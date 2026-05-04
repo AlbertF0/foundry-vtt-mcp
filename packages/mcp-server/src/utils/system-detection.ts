@@ -11,7 +11,7 @@ import { Logger } from '../logger.js';
 /**
  * Supported game systems
  */
-export type GameSystem = 'dnd5e' | 'pf2e' | 'other';
+export type GameSystem = 'dnd5e' | 'pf2e' | 'cosmere-rpg' | 'other';
 
 /**
  * Cache for system detection (avoid repeated queries)
@@ -33,7 +33,12 @@ export async function detectGameSystem(
 
   try {
     const worldInfo = await foundryClient.query('foundry-mcp-bridge.getWorldInfo');
-    const systemId = worldInfo.system?.toLowerCase() || '';
+    // Foundry's getWorldInfo can return `system` as either a string (legacy)
+    // or an object `{ id, version }` (current). Accept both.
+    const rawSystem: any = worldInfo.system;
+    const systemId = (typeof rawSystem === 'string'
+      ? rawSystem
+      : rawSystem?.id ?? '').toLowerCase();
 
     cachedSystemId = systemId;
 
@@ -41,6 +46,8 @@ export async function detectGameSystem(
       cachedSystem = 'dnd5e';
     } else if (systemId === 'pf2e') {
       cachedSystem = 'pf2e';
+    } else if (systemId === 'cosmere-rpg') {
+      cachedSystem = 'cosmere-rpg';
     } else {
       cachedSystem = 'other';
     }
