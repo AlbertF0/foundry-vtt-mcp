@@ -114,8 +114,38 @@ interface PF2eCreatureIndex {
   img?: string;
 }
 
-// Union type for both systems
-type EnhancedCreatureIndex = DnD5eCreatureIndex | PF2eCreatureIndex;
+// Cosmere RPG (Plotweaver) Enhanced Creature Index
+//
+// Plotweaver categorises adversaries by `tier` (1-4) and `role`
+// (minion/rival/boss) rather than CR or level — those are the primary
+// encounter-design dials. Defenses are split into phy/cog/spi instead
+// of a single AC, and Investiture is the Surge/Stormlight resource.
+interface CosmereRpgCreatureIndex {
+  id: string;
+  name: string;
+  type: string; // 'adversary' for compendium creatures
+  pack: string;
+  packLabel: string;
+  tier: number; // 1-4
+  role: string; // minion | rival | boss | (system-extended)
+  creatureType: string; // humanoid | animal | spren | …
+  subtype: string; // free-form secondary type
+  size: string;
+  hitPoints: number; // resources.hea.max (override-aware)
+  focus: number; // resources.foc.max
+  investiture: number; // resources.inv.max — typically 0
+  hasInvestiture: boolean;
+  defensePhysical: number;
+  defenseCognitive: number;
+  defenseSpiritual: number;
+  deflect: number;
+  walkSpeed: number;
+  description?: string;
+  img?: string;
+}
+
+// Union type across all supported systems
+type EnhancedCreatureIndex = DnD5eCreatureIndex | PF2eCreatureIndex | CosmereRpgCreatureIndex;
 
 interface PersistentIndexMetadata {
   version: string;
@@ -571,9 +601,11 @@ class PersistentCreatureIndex {
       return await this.buildPF2eIndex(force);
     } else if (gameSystem === 'dnd5e') {
       return await this.buildDnD5eIndex(force);
+    } else if (gameSystem === 'cosmere-rpg') {
+      return await this.buildCosmereRpgIndex(force);
     } else {
       throw new Error(
-        `Enhanced creature index not supported for system: ${gameSystem}. Only D&D 5e and Pathfinder 2e are currently supported.`
+        `Enhanced creature index not supported for system: ${gameSystem}. Only D&D 5e, Pathfinder 2e, and Cosmere RPG are currently supported.`
       );
     }
   }
@@ -1175,6 +1207,277 @@ class PersistentCreatureIndex {
           armorClass: 10,
           hasSpells: false,
           alignment: 'N',
+          description: 'Data extraction failed',
+          img: doc.img || '',
+        },
+        errors: 1,
+      };
+    }
+  }
+
+  /**
+   * Build Cosmere RPG (Plotweaver) enhanced creature index.
+   *
+   * Indexes `adversary`-type actors. Player characters are excluded —
+   * they're individual sheets, not encounter material.
+   */
+  private async buildCosmereRpgIndex(_force = false): Promise<CosmereRpgCreatureIndex[]> {
+    this.buildInProgress = true;
+
+    const startTime = Date.now();
+    let progressNotification: any = null;
+    let totalErrors = 0;
+
+    try {
+      const actorPacks = Array.from(game.packs.values()).filter(
+        pack => pack.metadata.type === 'Actor'
+      );
+      const enhancedCreatures: CosmereRpgCreatureIndex[] = [];
+      const packFingerprints = new Map<string, PackFingerprint>();
+
+      ui.notifications?.info(
+        `Starting Cosmere RPG creature index build from ${actorPacks.length} packs...`
+      );
+
+      for (let i = 0; i < actorPacks.length; i++) {
+        const pack = actorPacks[i];
+        const progressPercent = Math.round((i / actorPacks.length) * 100);
+
+        if (i % 3 === 0 || pack.metadata.label.toLowerCase().includes('adversar')) {
+          if (progressNotification) {
+            progressNotification.remove();
+          }
+          progressNotification = ui.notifications?.info(
+            `Building creature index... ${progressPercent}% (${i + 1}/${actorPacks.length}) Processing: ${pack.metadata.label}`
+          );
+        }
+
+        try {
+          if (!pack.indexed) {
+            await pack.getIndex({});
+          }
+
+          packFingerprints.set(pack.metadata.id, this.generatePackFingerprint(pack));
+
+          const packResult = await this.extractCosmereRpgDataFromPack(pack);
+          enhancedCreatures.push(...packResult.creatures);
+          totalErrors += packResult.errors;
+
+          if (i === 0 || (i + 1) % 5 === 0 || i === actorPacks.length - 1) {
+            const totalCreaturesSoFar = enhancedCreatures.length;
+            if (progressNotification) {
+              progressNotification.remove();
+            }
+            progressNotification = ui.notifications?.info(
+              `Index Progress: ${i + 1}/${actorPacks.length} packs complete, ${totalCreaturesSoFar} creatures indexed`
+            );
+          }
+        } catch (error) {
+          console.warn(`[${this.moduleId}] Failed to process pack ${pack.metadata.label}:`, error);
+          ui.notifications?.warn(
+            `Warning: Failed to index pack "${pack.metadata.label}" - continuing with other packs`
+          );
+        }
+      }
+
+      if (progressNotification) {
+        progressNotification.remove();
+      }
+      ui.notifications?.info(
+        `Saving enhanced index to world database... (${enhancedCreatures.length} creatures)`
+      );
+
+      const persistentIndex: PersistentEnhancedIndex = {
+        metadata: {
+          version: this.INDEX_VERSION,
+          timestamp: Date.now(),
+          packFingerprints,
+          totalCreatures: enhancedCreatures.length,
+          gameSystem: 'cosmere-rpg',
+        },
+        creatures: enhancedCreatures,
+      };
+
+      await this.savePersistedIndex(persistentIndex);
+
+      const buildTimeSeconds = Math.round((Date.now() - startTime) / 1000);
+      const errorText = totalErrors > 0 ? ` (${totalErrors} extraction errors)` : '';
+      const successMessage = `Cosmere RPG creature index complete! ${enhancedCreatures.length} creatures indexed from ${actorPacks.length} packs in ${buildTimeSeconds}s${errorText}`;
+
+      ui.notifications?.info(successMessage);
+
+      return enhancedCreatures;
+    } catch (error) {
+      if (progressNotification) {
+        progressNotification.remove();
+      }
+
+      const errorMessage = `Failed to build Cosmere RPG creature index: ${error instanceof Error ? error.message : 'Unknown error'}`;
+      console.error(`[${this.moduleId}] ${errorMessage}`);
+      ui.notifications?.error(errorMessage);
+
+      throw error;
+    } finally {
+      this.buildInProgress = false;
+      if (progressNotification) {
+        progressNotification.remove();
+      }
+    }
+  }
+
+  /**
+   * Extract Cosmere RPG creatures from a single pack.
+   */
+  private async extractCosmereRpgDataFromPack(
+    pack: any
+  ): Promise<{ creatures: CosmereRpgCreatureIndex[]; errors: number }> {
+    const creatures: CosmereRpgCreatureIndex[] = [];
+    let errors = 0;
+
+    try {
+      const documents = await pack.getDocuments();
+
+      for (const doc of documents) {
+        try {
+          if (doc.type !== 'adversary') {
+            continue;
+          }
+
+          const result = this.extractCosmereRpgCreatureData(doc, pack);
+          if (result) {
+            creatures.push(result.creature);
+            errors += result.errors;
+          }
+        } catch (error) {
+          console.warn(
+            `[${this.moduleId}] Failed to extract Cosmere RPG data from ${doc.name} in ${pack.metadata.label}:`,
+            error
+          );
+          errors++;
+        }
+      }
+    } catch (error) {
+      console.warn(
+        `[${this.moduleId}] Failed to load documents from ${pack.metadata.label}:`,
+        error
+      );
+      errors++;
+    }
+
+    return { creatures, errors };
+  }
+
+  /**
+   * Resolve a Cosmere DerivedValueField (`{value, derived, override?, useOverride, bonus?}`).
+   * Honours `useOverride: true` so manually-typed values (like Investiture max
+   * on a sheet the system can't auto-derive) come through correctly.
+   */
+  private readDerived(field: any): number | undefined {
+    if (field == null) return undefined;
+    if (typeof field === 'number') return field;
+    if (typeof field === 'object') {
+      if (field.useOverride === true && typeof field.override === 'number') {
+        return field.override;
+      }
+      if (typeof field.value === 'number') return field.value;
+      if (typeof field.derived === 'number') return field.derived;
+    }
+    return undefined;
+  }
+
+  /**
+   * Extract a single Cosmere RPG adversary into the creature index format.
+   */
+  private extractCosmereRpgCreatureData(
+    doc: any,
+    pack: any
+  ): { creature: CosmereRpgCreatureIndex; errors: number } | null {
+    try {
+      const system = doc.system ?? {};
+
+      const tier = typeof system.tier === 'number' ? system.tier : 0;
+      const role =
+        typeof system.role === 'string' && system.role.length > 0
+          ? system.role.toLowerCase()
+          : 'unknown';
+
+      const size =
+        typeof system.size === 'string' && system.size.length > 0
+          ? system.size.toLowerCase()
+          : 'medium';
+
+      const creatureType =
+        typeof system.type?.id === 'string' && system.type.id.length > 0
+          ? system.type.id.toLowerCase()
+          : 'unknown';
+
+      const subtype =
+        typeof system.type?.subtype === 'string' && system.type.subtype.length > 0
+          ? system.type.subtype
+          : '';
+
+      const hitPoints = this.readDerived(system.resources?.hea?.max) ?? 0;
+      const focus = this.readDerived(system.resources?.foc?.max) ?? 0;
+      const investiture = this.readDerived(system.resources?.inv?.max) ?? 0;
+
+      const defensePhysical = this.readDerived(system.defenses?.phy) ?? 0;
+      const defenseCognitive = this.readDerived(system.defenses?.cog) ?? 0;
+      const defenseSpiritual = this.readDerived(system.defenses?.spi) ?? 0;
+
+      const deflect = this.readDerived(system.deflect) ?? 0;
+      const walkSpeed = this.readDerived(system.movement?.walk?.rate) ?? 0;
+
+      return {
+        creature: {
+          id: doc._id,
+          name: doc.name,
+          type: doc.type,
+          pack: pack.metadata.id,
+          packLabel: pack.metadata.label,
+          tier,
+          role,
+          creatureType,
+          subtype,
+          size,
+          hitPoints,
+          focus,
+          investiture,
+          hasInvestiture: investiture > 0,
+          defensePhysical,
+          defenseCognitive,
+          defenseSpiritual,
+          deflect,
+          walkSpeed,
+          img: doc.img,
+        },
+        errors: 0,
+      };
+    } catch (error) {
+      console.warn(
+        `[${this.moduleId}] Failed to extract Cosmere RPG data from ${doc.name}:`,
+        error
+      );
+      return {
+        creature: {
+          id: doc._id,
+          name: doc.name,
+          type: doc.type,
+          pack: pack.metadata.id,
+          packLabel: pack.metadata.label,
+          tier: 0,
+          role: 'unknown',
+          creatureType: 'unknown',
+          subtype: '',
+          size: 'medium',
+          hitPoints: 0,
+          focus: 0,
+          investiture: 0,
+          hasInvestiture: false,
+          defensePhysical: 0,
+          defenseCognitive: 0,
+          defenseSpiritual: 0,
+          deflect: 0,
+          walkSpeed: 0,
           description: 'Data extraction failed',
           img: doc.img || '',
         },
@@ -2559,17 +2862,17 @@ export class FoundryDataAccess {
         this.passesEnhancedCriteria(creature, criteria)
       );
 
-      // Sort by Level/CR then name for consistent ordering (system-aware)
+      // Sort by power level then name for consistent ordering (system-aware).
+      // Power-level dial: tier (cosmere), level (pf2e), challengeRating (dnd5e).
+      const powerLevel = (c: EnhancedCreatureIndex): number => {
+        if ('tier' in c) return (c as CosmereRpgCreatureIndex).tier;
+        if ('level' in c) return (c as PF2eCreatureIndex).level;
+        return (c as DnD5eCreatureIndex).challengeRating;
+      };
       filteredCreatures.sort((a, b) => {
-        // Get power level (CR for D&D 5e, Level for PF2e)
-        const powerA =
-          'level' in a ? (a as PF2eCreatureIndex).level : (a as DnD5eCreatureIndex).challengeRating;
-        const powerB =
-          'level' in b ? (b as PF2eCreatureIndex).level : (b as DnD5eCreatureIndex).challengeRating;
-
-        if (powerA !== powerB) {
-          return powerA - powerB; // Lower power first
-        }
+        const powerA = powerLevel(a);
+        const powerB = powerLevel(b);
+        if (powerA !== powerB) return powerA - powerB;
         return a.name.localeCompare(b.name);
       });
 
@@ -2580,10 +2883,10 @@ export class FoundryDataAccess {
 
       // Convert enhanced creatures to result format (system-aware)
       const results = filteredCreatures.map(creature => {
-        // Type guard for result formatting
-        const isPF2e = 'level' in creature;
+        const isCosmere = 'tier' in creature;
+        const isPF2e = !isCosmere && 'level' in creature;
 
-        return {
+        const base = {
           id: creature.id,
           name: creature.name,
           type: creature.type,
@@ -2591,30 +2894,55 @@ export class FoundryDataAccess {
           packLabel: creature.packLabel,
           description: creature.description || '',
           hasImage: !!creature.img,
-
-          // System-aware summary
-          summary: isPF2e
-            ? `Level ${(creature as PF2eCreatureIndex).level} ${creature.creatureType} (${(creature as PF2eCreatureIndex).rarity}) from ${creature.packLabel}`
-            : `CR ${(creature as DnD5eCreatureIndex).challengeRating} ${creature.creatureType} from ${creature.packLabel}`,
-
-          // Include all creature data (conditional based on system)
-          ...(isPF2e
-            ? {
-                level: (creature as PF2eCreatureIndex).level,
-                traits: (creature as PF2eCreatureIndex).traits,
-                rarity: (creature as PF2eCreatureIndex).rarity,
-              }
-            : {
-                challengeRating: (creature as DnD5eCreatureIndex).challengeRating,
-                hasLegendaryActions: (creature as DnD5eCreatureIndex).hasLegendaryActions,
-              }),
-
           creatureType: creature.creatureType,
           size: creature.size,
           hitPoints: creature.hitPoints,
-          armorClass: creature.armorClass,
-          hasSpells: creature.hasSpells,
-          alignment: creature.alignment,
+        };
+
+        if (isCosmere) {
+          const c = creature as CosmereRpgCreatureIndex;
+          return {
+            ...base,
+            summary: `Tier ${c.tier} ${c.role} ${c.creatureType} from ${c.packLabel}`,
+            tier: c.tier,
+            role: c.role,
+            subtype: c.subtype,
+            focus: c.focus,
+            investiture: c.investiture,
+            hasInvestiture: c.hasInvestiture,
+            defenses: {
+              physical: c.defensePhysical,
+              cognitive: c.defenseCognitive,
+              spiritual: c.defenseSpiritual,
+            },
+            deflect: c.deflect,
+            walkSpeed: c.walkSpeed,
+          };
+        }
+
+        if (isPF2e) {
+          const p = creature as PF2eCreatureIndex;
+          return {
+            ...base,
+            armorClass: p.armorClass,
+            hasSpells: p.hasSpells,
+            alignment: p.alignment,
+            summary: `Level ${p.level} ${p.creatureType} (${p.rarity}) from ${p.packLabel}`,
+            level: p.level,
+            traits: p.traits,
+            rarity: p.rarity,
+          };
+        }
+
+        const d = creature as DnD5eCreatureIndex;
+        return {
+          ...base,
+          armorClass: d.armorClass,
+          hasSpells: d.hasSpells,
+          alignment: d.alignment,
+          summary: `CR ${d.challengeRating} ${d.creatureType} from ${d.packLabel}`,
+          challengeRating: d.challengeRating,
+          hasLegendaryActions: d.hasLegendaryActions,
         };
       });
 
@@ -2661,15 +2989,98 @@ export class FoundryDataAccess {
   }
 
   /**
-   * Check if enhanced creature passes all specified criteria (system-aware routing)
+   * Check if enhanced creature passes all specified criteria (system-aware routing).
+   *
+   * Discriminator order matters: cosmere-rpg has a `tier` field, pf2e has
+   * `level`, dnd5e has `challengeRating`. Check cosmere first (tier is the
+   * narrowest signal), then pf2e, then fall through to dnd5e.
    */
   private passesEnhancedCriteria(creature: EnhancedCreatureIndex, criteria: any): boolean {
-    // Type guard for PF2e creatures - check for level property
+    if ('tier' in creature) {
+      return this.passesCosmereRpgCriteria(creature as CosmereRpgCreatureIndex, criteria);
+    }
     if ('level' in creature) {
       return this.passesPF2eCriteria(creature as PF2eCreatureIndex, criteria);
-    } else {
-      return this.passesDnD5eCriteria(creature as DnD5eCreatureIndex, criteria);
     }
+    return this.passesDnD5eCriteria(creature as DnD5eCreatureIndex, criteria);
+  }
+
+  /**
+   * Cosmere RPG criteria filter — tier, role, creatureType, size,
+   * hasInvestiture, hitPoints range, defenses minimums, deflect minimum.
+   */
+  private passesCosmereRpgCriteria(
+    creature: CosmereRpgCreatureIndex,
+    criteria: {
+      tier?: number | { min?: number; max?: number };
+      role?: string;
+      creatureType?: string;
+      size?: string;
+      hasInvestiture?: boolean;
+      hitPoints?: number | { min?: number; max?: number };
+      health?: number | { min?: number; max?: number };
+      defensesMin?: { phy?: number; cog?: number; spi?: number };
+      deflectMin?: number;
+    }
+  ): boolean {
+    if (criteria.tier !== undefined) {
+      if (typeof criteria.tier === 'number') {
+        if (creature.tier !== criteria.tier) return false;
+      } else {
+        const { min, max } = criteria.tier;
+        if (min !== undefined && creature.tier < min) return false;
+        if (max !== undefined && creature.tier > max) return false;
+      }
+    }
+
+    if (criteria.role && creature.role.toLowerCase() !== criteria.role.toLowerCase()) {
+      return false;
+    }
+
+    if (
+      criteria.creatureType &&
+      creature.creatureType.toLowerCase() !== criteria.creatureType.toLowerCase()
+    ) {
+      return false;
+    }
+
+    if (criteria.size && creature.size.toLowerCase() !== criteria.size.toLowerCase()) {
+      return false;
+    }
+
+    if (
+      criteria.hasInvestiture !== undefined &&
+      creature.hasInvestiture !== criteria.hasInvestiture
+    ) {
+      return false;
+    }
+
+    // Accept either `hitPoints` or `health` from callers — they're synonyms
+    // here (hitPoints is the cross-system convention; health is the cosmere-
+    // native term).
+    const hpRange = criteria.hitPoints ?? criteria.health;
+    if (hpRange !== undefined) {
+      if (typeof hpRange === 'number') {
+        if (creature.hitPoints !== hpRange) return false;
+      } else {
+        const { min, max } = hpRange;
+        if (min !== undefined && creature.hitPoints < min) return false;
+        if (max !== undefined && creature.hitPoints > max) return false;
+      }
+    }
+
+    if (criteria.defensesMin) {
+      const { phy, cog, spi } = criteria.defensesMin;
+      if (phy !== undefined && creature.defensePhysical < phy) return false;
+      if (cog !== undefined && creature.defenseCognitive < cog) return false;
+      if (spi !== undefined && creature.defenseSpiritual < spi) return false;
+    }
+
+    if (criteria.deflectMin !== undefined && creature.deflect < criteria.deflectMin) {
+      return false;
+    }
+
+    return true;
   }
 
   /**
@@ -3801,7 +4212,8 @@ export class FoundryDataAccess {
       }
 
       // Validate actor type - support all common actor types including DSA5 creatures
-      const validActorTypes = ['character', 'npc', 'creature'];
+      // and Cosmere RPG adversaries.
+      const validActorTypes = ['character', 'npc', 'creature', 'adversary'];
       if (!validActorTypes.includes(sourceDocument.type)) {
         throw new Error(
           `Document "${itemId}" has unsupported actor type: ${sourceDocument.type}. Supported types: ${validActorTypes.join(', ')}`
@@ -3899,6 +4311,105 @@ export class FoundryDataAccess {
       this.auditLog(
         'createActorFromCompendiumEntry',
         request,
+        'failure',
+        error instanceof Error ? error.message : 'Unknown error'
+      );
+      throw error;
+    }
+  }
+
+  /**
+   * Add one or more freshly-authored Item documents to an existing Actor.
+   *
+   * Unlike `createActorFromCompendium*`, the items here are constructed from
+   * caller-supplied data — no compendium lookup. This is the path used to
+   * push planner-authored content (talents, actions, powers, custom gear)
+   * onto a PC or NPC sheet.
+   *
+   * Validation is intentionally light: name + type are required, and the
+   * type is checked against the active system's declared Item document
+   * types when available. Everything else (system schema validation,
+   * required sub-fields) is delegated to Foundry's DataModel layer, which
+   * will fill defaults or throw a meaningful error.
+   */
+  async addActorItems(params: {
+    actorIdentifier: string;
+    items: Array<{
+      name: string;
+      type: string;
+      img?: string;
+      system?: Record<string, any>;
+    }>;
+  }): Promise<{
+    actorId: string;
+    actorName: string;
+    created: Array<{ id: string; name: string; type: string }>;
+  }> {
+    this.validateFoundryState();
+
+    const { actorIdentifier, items } = params;
+
+    if (!actorIdentifier) {
+      throw new Error('actorIdentifier is required');
+    }
+    if (!Array.isArray(items) || items.length === 0) {
+      throw new Error('items array is required and must contain at least one entry');
+    }
+
+    const actor = this.findActorByIdentifier(actorIdentifier);
+    if (!actor) {
+      throw new Error(`Actor not found: ${actorIdentifier}`);
+    }
+
+    // Discover the active system's declared Item types so we can give a
+    // useful error before sending the doc to Foundry's DataModel layer.
+    const itemDocTypes = (game as any).system?.documentTypes?.Item;
+    const validTypes: string[] | null =
+      itemDocTypes && typeof itemDocTypes === 'object' ? Object.keys(itemDocTypes) : null;
+
+    const payload = items.map((it, idx) => {
+      if (!it || typeof it.name !== 'string' || it.name.trim().length === 0) {
+        throw new Error(`items[${idx}]: "name" is required and must be a non-empty string`);
+      }
+      if (typeof it.type !== 'string' || it.type.trim().length === 0) {
+        throw new Error(`items[${idx}] ("${it.name}"): "type" is required`);
+      }
+      if (validTypes && !validTypes.includes(it.type)) {
+        throw new Error(
+          `items[${idx}] ("${it.name}"): unknown type "${it.type}" for system "${(game.system as any)?.id}". ` +
+            `Valid Item types: ${validTypes.join(', ')}`
+        );
+      }
+
+      const doc: Record<string, any> = { name: it.name, type: it.type };
+      if (it.img) doc.img = it.img;
+      if (it.system && typeof it.system === 'object') doc.system = it.system;
+      return doc;
+    });
+
+    try {
+      const created = await actor.createEmbeddedDocuments('Item', payload);
+
+      const result = {
+        actorId: actor.id,
+        actorName: actor.name,
+        created: (created || []).map((doc: any) => ({
+          id: doc.id,
+          name: doc.name,
+          type: doc.type,
+        })),
+      };
+
+      this.auditLog(
+        'addActorItems',
+        { actorIdentifier, actorId: actor.id, count: payload.length },
+        'success'
+      );
+      return result;
+    } catch (error) {
+      this.auditLog(
+        'addActorItems',
+        { actorIdentifier, actorId: actor.id, count: payload.length },
         'failure',
         error instanceof Error ? error.message : 'Unknown error'
       );
