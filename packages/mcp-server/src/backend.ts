@@ -199,7 +199,6 @@ function acquireLock(): boolean {
               return false;
             }
 
->>>>>>> 557aaf8 (fix: validate process name in acquireLock to prevent PID collision false positives)
           } catch {
             console.error(`Removing stale backend lock for PID ${lockPid}`);
 
