@@ -11,7 +11,7 @@ import { z } from 'zod';
  * Supported game system identifiers
  * Extend this type when adding new systems
  */
-export type SystemId = 'dnd5e' | 'pf2e' | 'dsa5' | 'cosmere-rpg' | 'other';
+export type SystemId = 'dnd5e' | 'pf2e' | 'dsa5' | 'cosmere-rpg' | 'wfrp4e' | 'other';
 
 /**
  * System metadata returned by adapters
@@ -281,6 +281,24 @@ export interface CosmereRpgCreatureIndex extends SystemCreatureIndex {
 }
 
 /**
+ * WFRP4e (Warhammer Fantasy Roleplay 4e) specific creature index structure.
+ *
+ * Character-focused adapter: the creature index is intentionally lightweight
+ * (WFRP4e has no Challenge Rating / level metric).
+ */
+export interface WFRP4eCreatureIndex extends SystemCreatureIndex {
+  system: 'wfrp4e';
+  systemData: {
+    species?: string; // Species/race (Human, Beastman, Goblin, ...)
+    size?: string; // Normalized size label
+    wounds?: number; // Maximum wounds
+    hasSpells: boolean; // Has arcane spell items
+    hasPrayers: boolean; // Has divine prayer items
+    traits?: string[]; // Creature trait item names
+  };
+}
+
+/**
  * Generic creature index for unsupported systems
  */
 export interface GenericCreatureIndex extends SystemCreatureIndex {
@@ -296,4 +314,5 @@ export type AnyCreatureIndex =
   | PF2eCreatureIndex
   | DSA5CreatureIndex
   | CosmereRpgCreatureIndex
+  | WFRP4eCreatureIndex
   | GenericCreatureIndex;

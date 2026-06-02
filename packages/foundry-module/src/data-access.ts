@@ -1791,6 +1791,12 @@ export class FoundryDataAccess {
           if (targeting.target) result.target = targeting.target;
           if (targeting.area) result.area = targeting.area;
           result.actionCost = itemSystem?.castingTime?.value;
+        } else if (systemId === 'wfrp4e') {
+          // WFRP4e spells use a Casting Number (CN) rather than levels/slots.
+          if (itemSystem?.range?.value) result.range = itemSystem.range.value;
+          if (itemSystem?.target?.value) result.target = itemSystem.target.value;
+          const cn = itemSystem?.cn?.value;
+          if (cn !== undefined && cn !== null) result.actionCost = `CN ${cn}`;
         }
 
         // Category filter for spells
@@ -1818,6 +1824,23 @@ export class FoundryDataAccess {
           if (searchCategory === 'equipped' && !result.equipped) continue;
           if (searchCategory === 'invested' && !result.invested) continue;
         }
+      }
+
+      // WFRP4e equipment fields (British 'armour'; 'trapping' is generic gear)
+      if (
+        systemId === 'wfrp4e' &&
+        ['weapon', 'armour', 'trapping', 'ammunition', 'container'].includes(item.type)
+      ) {
+        result.quantity = itemSystem?.quantity?.value ?? 1;
+        result.equipped = itemSystem?.equipped?.value ?? (item as any).isEquipped ?? false;
+
+        if (searchCategory === 'equipped' && !result.equipped) continue;
+      }
+
+      // WFRP4e prayer targeting (divine magic; item type 'prayer')
+      if (systemId === 'wfrp4e' && item.type === 'prayer') {
+        if (itemSystem?.range?.value) result.range = itemSystem.range.value;
+        if (itemSystem?.target?.value) result.target = itemSystem.target.value;
       }
 
       // Feat/feature fields
@@ -1924,7 +1947,7 @@ export class FoundryDataAccess {
   }
 
   /**
-   * Extract spellcasting data from an actor (supports PF2e and D&D 5e)
+   * Extract spellcasting data from an actor (supports PF2e, D&D 5e, DSA5, and WFRP4e)
    */
   private extractSpellcastingData(actor: Actor): SpellcastingEntry[] {
     const entries: SpellcastingEntry[] = [];
@@ -2221,6 +2244,63 @@ export class FoundryDataAccess {
               };
             })
             .sort((a, b) => a.level - b.level || a.name.localeCompare(b.name)),
+        });
+      }
+    } else if (systemId === 'wfrp4e') {
+      // WFRP4e: arcane spells grouped by Lore, divine prayers grouped by God.
+      // WFRP4e has no spell levels or slots; spells use a Casting Number (CN).
+      const cap = (s: string) => (s ? s.charAt(0).toUpperCase() + s.slice(1) : s);
+
+      // Arcane spells, grouped by lore
+      const spellsByLore = new Map<string, SpellInfo[]>();
+      for (const spell of actor.items.filter(item => item.type === 'spell')) {
+        const spellSystem = spell.system as any;
+        const loreRaw = spellSystem?.lore?.value;
+        const lore = String((Array.isArray(loreRaw) ? loreRaw[0] : loreRaw) || 'arcane');
+        const cn = spellSystem?.cn?.value;
+        const info: SpellInfo = {
+          id: spell.id || '',
+          name: spell.name || '',
+          level: 0,
+          actionCost: cn !== undefined && cn !== null ? `CN ${cn}` : undefined,
+          range: spellSystem?.range?.value || undefined,
+          target: spellSystem?.target?.value || undefined,
+        };
+        if (!spellsByLore.has(lore)) spellsByLore.set(lore, []);
+        spellsByLore.get(lore)!.push(info);
+      }
+      for (const [lore, loreSpells] of spellsByLore) {
+        entries.push({
+          id: `lore-${lore}`,
+          name: `Lore of ${cap(lore)}`,
+          type: 'arcane',
+          tradition: 'arcane',
+          spells: loreSpells.sort((a, b) => a.name.localeCompare(b.name)),
+        });
+      }
+
+      // Divine prayers, grouped by god
+      const prayersByGod = new Map<string, SpellInfo[]>();
+      for (const prayer of actor.items.filter(item => item.type === 'prayer')) {
+        const praySystem = prayer.system as any;
+        const god = String(praySystem?.god?.value || 'divine');
+        const info: SpellInfo = {
+          id: prayer.id || '',
+          name: prayer.name || '',
+          level: 0,
+          range: praySystem?.range?.value || undefined,
+          target: praySystem?.target?.value || undefined,
+        };
+        if (!prayersByGod.has(god)) prayersByGod.set(god, []);
+        prayersByGod.get(god)!.push(info);
+      }
+      for (const [god, godPrayers] of prayersByGod) {
+        entries.push({
+          id: `prayers-${god}`,
+          name: god === 'divine' ? 'Prayers' : `Prayers (${cap(god)})`,
+          type: 'divine',
+          tradition: 'divine',
+          spells: godPrayers.sort((a, b) => a.name.localeCompare(b.name)),
         });
       }
     }
