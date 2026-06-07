@@ -265,7 +265,7 @@ export class DnD5eAddFeatureTool {
             attackBonus: {
               type: 'number',
               description:
-                'Magic bonus added to both to-hit and damage (e.g. 1 for a +1 weapon). ' +
+                'Flat bonus to the attack roll only, not damage (e.g. 1 for +1 to hit). ' +
                 'Used by: attack, attack-with-save. Default: 0.',
               minimum: 0,
               maximum: 10,
@@ -648,7 +648,7 @@ export class DnD5eAddFeatureTool {
   }
 
   private formatAttackResponse(result: any, params: any, warnings: string[]): any {
-    const bonusStr   = params.attackBonus > 0 ? ` +${params.attackBonus} (magic)` : '';
+    const bonusStr   = params.attackBonus > 0 ? ` +${params.attackBonus} to hit` : '';
     const damageDesc = (params.damageParts as any[]).map((p) => `${p.number}d${p.denomination} ${p.type}`).join(' + ');
     const rangeDesc  = params.attackType === 'melee'
       ? `reach ${params.reachFt ?? 5} ft.`
@@ -768,7 +768,7 @@ export class DnD5eAddFeatureTool {
   }
 
   private formatAttackWithSaveResponse(result: any, params: any, warnings: string[]): any {
-    const bonusStr         = params.attackBonus > 0 ? ` +${params.attackBonus} (magic)` : '';
+    const bonusStr         = params.attackBonus > 0 ? ` +${params.attackBonus} to hit` : '';
     const attackDamageDesc = (params.damageParts as any[]).map((p) => `${p.number}d${p.denomination} ${p.type}`).join(' + ');
     const saveDamageDesc   = (params.saveDamageParts as any[]).map((p) => `${p.number}d${p.denomination} ${p.type}`).join(' + ');
     const rangeDesc        = params.attackType === 'melee'
