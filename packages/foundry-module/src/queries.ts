@@ -1,14 +1,17 @@
 import { MODULE_ID } from './constants.js';
 import { FoundryDataAccess } from './data-access.js';
 import { ComfyUIManager } from './comfyui-manager.js';
+import { WorldBuilderHandlers } from './world-builder.js';
 
 export class QueryHandlers {
   public dataAccess: FoundryDataAccess;
   private comfyuiManager: ComfyUIManager;
+  private worldBuilder: WorldBuilderHandlers;
 
   constructor() {
     this.dataAccess = new FoundryDataAccess();
     this.comfyuiManager = new ComfyUIManager();
+    this.worldBuilder = new WorldBuilderHandlers();
   }
 
   /**
@@ -113,6 +116,8 @@ export class QueryHandlers {
 
     // Item authoring on actor sheets
     CONFIG.queries[`${modulePrefix}.addActorItems`] = this.handleAddActorItems.bind(this);
+    CONFIG.queries[`${modulePrefix}.copyWorldItemToActor`] =
+      this.handleCopyWorldItemToActor.bind(this);
 
     // World-level item CRUD
     CONFIG.queries[`${modulePrefix}.createWorldItems`] = this.handleCreateWorldItems.bind(this);
@@ -130,15 +135,23 @@ export class QueryHandlers {
       this.handleGetAvailableConditions.bind(this);
 
     // D&D 5e queries
-    CONFIG.queries[`${modulePrefix}.addSaveFeatureToActor`] = this.handleAddSaveFeatureToActor.bind(this);
+    CONFIG.queries[`${modulePrefix}.addSaveFeatureToActor`] =
+      this.handleAddSaveFeatureToActor.bind(this);
     CONFIG.queries[`${modulePrefix}.createNpcActor`] = this.handleCreateNpcActor.bind(this);
     CONFIG.queries[`${modulePrefix}.addAttackToActor`] = this.handleAddAttackToActor.bind(this);
     CONFIG.queries[`${modulePrefix}.addAuraToActor`] = this.handleAddAuraToActor.bind(this);
-    CONFIG.queries[`${modulePrefix}.addPassiveFeatureToActor`] = this.handleAddPassiveFeatureToActor.bind(this);
-    CONFIG.queries[`${modulePrefix}.addAttackWithSaveToActor`] = this.handleAddAttackWithSaveToActor.bind(this);
-    CONFIG.queries[`${modulePrefix}.setActorSpellcasting`] = this.handleSetActorSpellcasting.bind(this);
+    CONFIG.queries[`${modulePrefix}.addPassiveFeatureToActor`] =
+      this.handleAddPassiveFeatureToActor.bind(this);
+    CONFIG.queries[`${modulePrefix}.addAttackWithSaveToActor`] =
+      this.handleAddAttackWithSaveToActor.bind(this);
+    CONFIG.queries[`${modulePrefix}.setActorSpellcasting`] =
+      this.handleSetActorSpellcasting.bind(this);
     CONFIG.queries[`${modulePrefix}.addSpellsToActor`] = this.handleAddSpellsToActor.bind(this);
-    CONFIG.queries[`${modulePrefix}.addFeaturesFromCompendium`] = this.handleAddFeaturesFromCompendium.bind(this);
+    CONFIG.queries[`${modulePrefix}.addFeaturesFromCompendium`] =
+      this.handleAddFeaturesFromCompendium.bind(this);
+
+    // World Builder adapter layer (scenes, folders, actor assets, Plutonium)
+    this.worldBuilder.registerHandlers();
   }
 
   /**
@@ -557,6 +570,7 @@ export class QueryHandlers {
       return await this.dataAccess.createJournalEntry({
         name: data.name,
         content: data.content,
+        firstPageName: data.firstPageName,
         additionalPages: data.additionalPages,
         folderName: data.folderName,
       });
@@ -1520,6 +1534,36 @@ export class QueryHandlers {
     }
   }
 
+  private async handleCopyWorldItemToActor(data: {
+    actorIdentifier: string;
+    itemIdentifier: string;
+  }): Promise<any> {
+    try {
+      const gmCheck = this.validateGMAccess();
+      if (!gmCheck.allowed) {
+        return { error: 'Access denied', success: false };
+      }
+
+      this.dataAccess.validateFoundryState();
+
+      if (!data?.actorIdentifier) {
+        throw new Error('actorIdentifier is required');
+      }
+      if (!data?.itemIdentifier) {
+        throw new Error('itemIdentifier is required');
+      }
+
+      return await this.dataAccess.copyWorldItemToActor({
+        actorIdentifier: data.actorIdentifier,
+        itemIdentifier: data.itemIdentifier,
+      });
+    } catch (error) {
+      throw new Error(
+        `Failed to copy world item to actor: ${error instanceof Error ? error.message : 'Unknown error'}`
+      );
+    }
+  }
+
   private async handleUpdateWorldItems(data: {
     updates: Array<{
       id: string;
@@ -1543,7 +1587,9 @@ export class QueryHandlers {
 
       return await this.dataAccess.updateWorldItems({ updates: data.updates });
     } catch (error) {
-      throw new Error(`Failed to update world items: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      throw new Error(
+        `Failed to update world items: ${error instanceof Error ? error.message : 'Unknown error'}`
+      );
     }
   }
 
@@ -1566,7 +1612,9 @@ export class QueryHandlers {
         ...(data.nameFilter !== undefined ? { nameFilter: data.nameFilter } : {}),
       });
     } catch (error) {
-      throw new Error(`Failed to list world items: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      throw new Error(
+        `Failed to list world items: ${error instanceof Error ? error.message : 'Unknown error'}`
+      );
     }
   }
 
@@ -1627,7 +1675,9 @@ export class QueryHandlers {
 
       return await this.dataAccess.addSaveFeatureToActor(data);
     } catch (error) {
-      throw new Error(`Failed to add save feature to actor: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      throw new Error(
+        `Failed to add save feature to actor: ${error instanceof Error ? error.message : 'Unknown error'}`
+      );
     }
   }
 
@@ -1671,7 +1721,9 @@ export class QueryHandlers {
 
       return await this.dataAccess.createNpcActor(data);
     } catch (error) {
-      throw new Error(`Failed to create NPC actor: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      throw new Error(
+        `Failed to create NPC actor: ${error instanceof Error ? error.message : 'Unknown error'}`
+      );
     }
   }
 
@@ -1703,7 +1755,9 @@ export class QueryHandlers {
 
       return await this.dataAccess.addAttackToActor(data);
     } catch (error) {
-      throw new Error(`Failed to add attack to actor: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      throw new Error(
+        `Failed to add attack to actor: ${error instanceof Error ? error.message : 'Unknown error'}`
+      );
     }
   }
 
@@ -1738,7 +1792,9 @@ export class QueryHandlers {
 
       return await this.dataAccess.addAuraToActor(data);
     } catch (error) {
-      throw new Error(`Failed to add aura to actor: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      throw new Error(
+        `Failed to add aura to actor: ${error instanceof Error ? error.message : 'Unknown error'}`
+      );
     }
   }
 
@@ -1763,7 +1819,9 @@ export class QueryHandlers {
 
       return await this.dataAccess.addPassiveFeatureToActor(data);
     } catch (error) {
-      throw new Error(`Failed to add passive feature to actor: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      throw new Error(
+        `Failed to add passive feature to actor: ${error instanceof Error ? error.message : 'Unknown error'}`
+      );
     }
   }
 
@@ -1780,20 +1838,22 @@ export class QueryHandlers {
       this.dataAccess.validateFoundryState();
 
       if (!data.actorIdentifier) throw new Error('actorIdentifier is required');
-      if (!data.featureName)     throw new Error('featureName is required');
-      if (!data.attackType)      throw new Error('attackType is required');
+      if (!data.featureName) throw new Error('featureName is required');
+      if (!data.attackType) throw new Error('attackType is required');
       if (!Array.isArray(data.damageParts) || data.damageParts.length === 0) {
         throw new Error('damageParts is required and must contain at least one element');
       }
       if (!data.saveAbility) throw new Error('saveAbility is required');
-      if (!data.saveDC)      throw new Error('saveDC is required');
+      if (!data.saveDC) throw new Error('saveDC is required');
       if (!Array.isArray(data.saveDamageParts) || data.saveDamageParts.length === 0) {
         throw new Error('saveDamageParts is required and must contain at least one element');
       }
 
       return await this.dataAccess.addAttackWithSaveToActor(data);
     } catch (error) {
-      throw new Error(`Failed to add attack+save to actor: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      throw new Error(
+        `Failed to add attack+save to actor: ${error instanceof Error ? error.message : 'Unknown error'}`
+      );
     }
   }
 
@@ -1805,7 +1865,11 @@ export class QueryHandlers {
       if (!data.spellcastingClass) {
         throw new Error('spellcastingClass is required');
       }
-      if (typeof data.spellcastingLevel !== 'number' || data.spellcastingLevel < 1 || data.spellcastingLevel > 20) {
+      if (
+        typeof data.spellcastingLevel !== 'number' ||
+        data.spellcastingLevel < 1 ||
+        data.spellcastingLevel > 20
+      ) {
         throw new Error('spellcastingLevel must be a number between 1 and 20');
       }
       if (!data.effectiveAbility) {
@@ -1814,7 +1878,9 @@ export class QueryHandlers {
 
       return await this.dataAccess.setActorSpellcasting(data);
     } catch (error) {
-      throw new Error(`Failed to set actor spellcasting: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      throw new Error(
+        `Failed to set actor spellcasting: ${error instanceof Error ? error.message : 'Unknown error'}`
+      );
     }
   }
 
@@ -1832,7 +1898,9 @@ export class QueryHandlers {
 
       return await this.dataAccess.addSpellsToActor(data);
     } catch (error) {
-      throw new Error(`Failed to add spells to actor: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      throw new Error(
+        `Failed to add spells to actor: ${error instanceof Error ? error.message : 'Unknown error'}`
+      );
     }
   }
 
@@ -1850,8 +1918,9 @@ export class QueryHandlers {
 
       return await this.dataAccess.addFeaturesFromCompendium(data);
     } catch (error) {
-      throw new Error(`Failed to add features from compendium: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      throw new Error(
+        `Failed to add features from compendium: ${error instanceof Error ? error.message : 'Unknown error'}`
+      );
     }
   }
-
 }

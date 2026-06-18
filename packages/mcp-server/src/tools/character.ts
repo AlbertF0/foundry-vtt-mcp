@@ -146,15 +146,16 @@ export class CharacterTools {
           '- "create": Create world-level Items in the sidebar (not actor-attached). Good for reusable libraries. GM-only.\n' +
           '- "list": List world-level Items with optional type/folder/name filters.\n' +
           '- "update": Update existing world-level Items by ID. GM-only.\n' +
-          '- "add-to-actor": Create and attach Items directly to an existing actor. GM-only.',
+          '- "add-to-actor": Create and attach new Items directly to an existing actor. GM-only.\n' +
+          '- "copy-world-item-to-actor": Copy an existing world-level Item (from game.items) into an actor\'s inventory. Pass actorIdentifier and itemIdentifier (name or ID). GM-only.',
         inputSchema: {
           type: 'object',
           properties: {
             action: {
               type: 'string',
-              enum: ['create', 'list', 'update', 'add-to-actor'],
+              enum: ['create', 'list', 'update', 'add-to-actor', 'copy-world-item-to-actor'],
               description:
-                'Operation to perform: "create" world items, "list" world items, "update" world items by id, or "add-to-actor" to attach items to an actor.',
+                'Operation to perform: "create" world items, "list" world items, "update" world items by id, "add-to-actor" to create and attach items to an actor, or "copy-world-item-to-actor" to copy an existing world item into an actor.',
             },
             items: {
               type: 'array',
@@ -167,7 +168,8 @@ export class CharacterTools {
                   name: { type: 'string', description: 'Display name of the item' },
                   type: {
                     type: 'string',
-                    description: 'Item type valid for the active system (e.g. "action", "talent", "weapon")',
+                    description:
+                      'Item type valid for the active system (e.g. "action", "talent", "weapon")',
                   },
                   img: {
                     type: 'string',
@@ -175,7 +177,8 @@ export class CharacterTools {
                   },
                   system: {
                     type: 'object',
-                    description: 'System-specific data (free-form). Passed through to Foundry\'s DataModel layer.',
+                    description:
+                      "System-specific data (free-form). Passed through to Foundry's DataModel layer.",
                     additionalProperties: true,
                   },
                 },
@@ -195,7 +198,8 @@ export class CharacterTools {
                   img: { type: 'string', description: 'New icon path' },
                   system: {
                     type: 'object',
-                    description: 'System-specific fields to update (merged into existing system data)',
+                    description:
+                      'System-specific fields to update (merged into existing system data)',
                     additionalProperties: true,
                   },
                   folder: {
@@ -213,7 +217,8 @@ export class CharacterTools {
             },
             type: {
               type: 'string',
-              description: 'For "list": filter by item type (e.g. "action", "talent"). Omit to return all types.',
+              description:
+                'For "list": filter by item type (e.g. "action", "talent"). Omit to return all types.',
             },
             nameFilter: {
               type: 'string',
@@ -221,7 +226,13 @@ export class CharacterTools {
             },
             actorIdentifier: {
               type: 'string',
-              description: 'For "add-to-actor": actor name or ID to receive the items.',
+              description:
+                'For "add-to-actor" and "copy-world-item-to-actor": actor name or ID to receive the items.',
+            },
+            itemIdentifier: {
+              type: 'string',
+              description:
+                'For "copy-world-item-to-actor": name or ID of the world-level item to copy into the actor.',
             },
           },
           required: ['action'],
@@ -550,15 +561,18 @@ export class CharacterTools {
     });
 
     try {
-      const result = await this.foundryClient.query('foundry-mcp-bridge.updateWorldItems', { updates });
+      const result = await this.foundryClient.query('foundry-mcp-bridge.updateWorldItems', {
+        updates,
+      });
 
       this.logger.debug('Successfully updated world items', { count: result.updated?.length ?? 0 });
 
       return result;
-
     } catch (error) {
       this.logger.error('Failed to update world items', error);
-      throw new Error(`Failed to update world items: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      throw new Error(
+        `Failed to update world items: ${error instanceof Error ? error.message : 'Unknown error'}`
+      );
     }
   }
 
@@ -571,7 +585,11 @@ export class CharacterTools {
 
     const { type, folder, nameFilter } = schema.parse(args);
 
-    this.logger.info('Listing world items', { type: type ?? null, folder: folder ?? null, nameFilter: nameFilter ?? null });
+    this.logger.info('Listing world items', {
+      type: type ?? null,
+      folder: folder ?? null,
+      nameFilter: nameFilter ?? null,
+    });
 
     try {
       const items = await this.foundryClient.query('foundry-mcp-bridge.listWorldItems', {
@@ -586,10 +604,11 @@ export class CharacterTools {
         items: items ?? [],
         total: items?.length ?? 0,
       };
-
     } catch (error) {
       this.logger.error('Failed to list world items', error);
-      throw new Error(`Failed to list world items: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      throw new Error(
+        `Failed to list world items: ${error instanceof Error ? error.message : 'Unknown error'}`
+      );
     }
   }
 
@@ -626,15 +645,20 @@ export class CharacterTools {
       });
 
       return result;
-
     } catch (error) {
       this.logger.error('Failed to create world items', error);
-      throw new Error(`Failed to create world items: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      throw new Error(
+        `Failed to create world items: ${error instanceof Error ? error.message : 'Unknown error'}`
+      );
     }
   }
 
   async handleManageWorldItems(args: any): Promise<any> {
-    const { action } = z.object({ action: z.enum(['create', 'list', 'update', 'add-to-actor']) }).parse(args);
+    const { action } = z
+      .object({
+        action: z.enum(['create', 'list', 'update', 'add-to-actor', 'copy-world-item-to-actor']),
+      })
+      .parse(args);
 
     switch (action) {
       case 'create':
@@ -645,6 +669,38 @@ export class CharacterTools {
         return this.handleUpdateWorldItems(args);
       case 'add-to-actor':
         return this.handleAddActorItems(args);
+      case 'copy-world-item-to-actor':
+        return this.handleCopyWorldItemToActor(args);
+    }
+  }
+
+  async handleCopyWorldItemToActor(args: any): Promise<any> {
+    const schema = z.object({
+      actorIdentifier: z.string().min(1, 'Actor identifier cannot be empty'),
+      itemIdentifier: z.string().min(1, 'Item identifier cannot be empty'),
+    });
+
+    const { actorIdentifier, itemIdentifier } = schema.parse(args);
+
+    this.logger.info('Copying world item to actor', { actorIdentifier, itemIdentifier });
+
+    try {
+      const result = await this.foundryClient.query('foundry-mcp-bridge.copyWorldItemToActor', {
+        actorIdentifier,
+        itemIdentifier,
+      });
+
+      this.logger.debug('Successfully copied world item to actor', {
+        actorName: result.actorName,
+        itemName: result.itemName,
+      });
+
+      return result;
+    } catch (error) {
+      this.logger.error('Failed to copy world item to actor', error);
+      throw new Error(
+        `Failed to copy "${itemIdentifier}" to actor "${actorIdentifier}": ${error instanceof Error ? error.message : 'Unknown error'}`
+      );
     }
   }
 

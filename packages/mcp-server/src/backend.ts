@@ -36,6 +36,8 @@ import { MapGenerationTools } from './tools/map-generation.js';
 
 import { TokenManipulationTools } from './tools/token-manipulation.js';
 
+import { WorldBuilderTools } from './tools/world-builder.js';
+
 import { DSA5CharacterCreator } from './systems/dsa5/character-creator.js';
 
 import { DnD5eAddFeatureTool } from './tools/dnd5e/add-feature.js';
@@ -190,15 +192,16 @@ function acquireLock(): boolean {
             if (evaluateLockFile(lockPid, LOCK_FILE) === 'orphaned') {
               console.error(
                 `Removing orphaned backend lock for PID ${lockPid} ` +
-                `(process is not node.exe or lock file is stale)`,
+                  `(process is not node.exe or lock file is stale)`
               );
-              try { fs.unlinkSync(LOCK_FILE); } catch {}
+              try {
+                fs.unlinkSync(LOCK_FILE);
+              } catch {}
               lockFd = fs.openSync(LOCK_FILE, 'wx');
             } else {
               // Backend is genuinely running — exit gracefully
               return false;
             }
-
           } catch {
             console.error(`Removing stale backend lock for PID ${lockPid}`);
 
@@ -1189,9 +1192,12 @@ async function startBackend(): Promise<void> {
 
   const dsa5CharacterCreator = new DSA5CharacterCreator({ foundryClient, logger });
 
-  const dnd5eAddFeatureTool              = new DnD5eAddFeatureTool({ foundryClient, logger });
-  const dnd5eNpcTools                    = new DnD5eNpcTools({ foundryClient, logger });
-  const dnd5eFeaturesFromCompendiumTools = new DnD5eFeaturesFromCompendiumTools({ foundryClient, logger });
+  const dnd5eAddFeatureTool = new DnD5eAddFeatureTool({ foundryClient, logger });
+  const dnd5eNpcTools = new DnD5eNpcTools({ foundryClient, logger });
+  const dnd5eFeaturesFromCompendiumTools = new DnD5eFeaturesFromCompendiumTools({
+    foundryClient,
+    logger,
+  });
 
   const questCreationTools = new QuestCreationTools({ foundryClient, logger });
 
@@ -1202,6 +1208,8 @@ async function startBackend(): Promise<void> {
   const ownershipTools = new OwnershipTools({ foundryClient, logger });
 
   const tokenManipulationTools = new TokenManipulationTools({ foundryClient, logger });
+
+  const worldBuilderTools = new WorldBuilderTools({ foundryClient, logger });
 
   // Initialize mapgen-style backend components for map generation
   let mapGenerationJobQueue: any = null;
@@ -1425,6 +1433,8 @@ async function startBackend(): Promise<void> {
     ...tokenManipulationTools.getToolDefinitions(),
 
     ...mapGenerationTools.getToolDefinitions(),
+
+    ...worldBuilderTools.getToolDefinitions(),
   ];
 
   // Start Foundry connector (owns app port 31415)
@@ -1453,6 +1463,11 @@ async function startBackend(): Promise<void> {
 
   const server = net.createServer(socket => {
     socket.setEncoding('utf8');
+
+    // Abruptly-closed clients (ECONNRESET) must not crash the backend
+    socket.on('error', err => {
+      logger.warn('Control socket error', { error: err.message });
+    });
 
     let buffer = '';
 
@@ -1583,20 +1598,18 @@ async function startBackend(): Promise<void> {
                 // D&D 5e tools
 
                 case 'dnd5e-add-feature':
-
                   result = await dnd5eAddFeatureTool.handleAddFeature(args);
 
                   break;
 
                 case 'dnd5e-create-npc':
-
                   result = await dnd5eNpcTools.handleCreateNpc(args);
 
                   break;
 
                 case 'dnd5e-add-features-from-compendium':
-
-                  result = await dnd5eFeaturesFromCompendiumTools.handleAddFeaturesFromCompendium(args);
+                  result =
+                    await dnd5eFeaturesFromCompendiumTools.handleAddFeaturesFromCompendium(args);
 
                   break;
 
@@ -1714,6 +1727,91 @@ async function startBackend(): Promise<void> {
 
                 case 'switch-scene':
                   result = await mapGenerationTools.switchScene(args);
+
+                  break;
+
+                case 'create-scene':
+                  result = await worldBuilderTools.handleCreateScene(args);
+
+                  break;
+
+                case 'create-folder':
+                  result = await worldBuilderTools.handleCreateFolder(args);
+
+                  break;
+
+                case 'create-journal':
+                  result = await worldBuilderTools.handleCreateJournal(args);
+
+                  break;
+
+                case 'update-actor':
+                  result = await worldBuilderTools.handleUpdateActor(args);
+
+                  break;
+
+                case 'delete-documents':
+                  result = await worldBuilderTools.handleDeleteDocuments(args);
+
+                  break;
+
+                case 'apply-walls':
+                  result = await worldBuilderTools.handleApplyWalls(args);
+
+                  break;
+
+                case 'plutonium-search-maps':
+                  result = await worldBuilderTools.handlePlutoniumSearchMaps(args);
+
+                  break;
+
+                case 'plutonium-search-adventure':
+                  result = await worldBuilderTools.handlePlutoniumSearchAdventure(args);
+
+                  break;
+
+                case 'plutonium-import-map':
+                  result = await worldBuilderTools.handlePlutoniumImportMap(args);
+
+                  break;
+
+                case 'set-scene-background':
+                  result = await worldBuilderTools.handleSetSceneBackground(args);
+
+                  break;
+
+                case 'place-tokens':
+                  result = await worldBuilderTools.handlePlaceTokens(args);
+
+                  break;
+
+                case 'get-scene-notes':
+                  result = await worldBuilderTools.handleGetSceneNotes(args);
+
+                  break;
+
+                case 'place-scene-notes':
+                  result = await worldBuilderTools.handlePlaceSceneNotes(args);
+
+                  break;
+
+                case 'delete-scene-notes':
+                  result = await worldBuilderTools.handleDeleteSceneNotes(args);
+
+                  break;
+
+                case 'update-journal-page':
+                  result = await worldBuilderTools.handleUpdateJournalPage(args);
+
+                  break;
+
+                case 'plutonium-search':
+                  result = await worldBuilderTools.handlePlutoniumSearch(args);
+
+                  break;
+
+                case 'plutonium-import':
+                  result = await worldBuilderTools.handlePlutoniumImport(args);
 
                   break;
 
