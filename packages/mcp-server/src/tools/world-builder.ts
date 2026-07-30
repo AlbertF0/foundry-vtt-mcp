@@ -297,6 +297,56 @@ export class WorldBuilderTools {
         },
       },
       {
+        name: 'manage-scene-assets',
+        description:
+          'Inspect or rewrite the image assets a scene points at: base-level background, foreground and every tile texture. Specify the operation with "action":\n' +
+          '- "list": audit what a scene (or every scene) references. Each asset comes back with its decoded filesystem "path" and a "location": "world" (inside worlds/<world>/, travels with a world backup), "external" (moulinette/, modules/… — LOST on backup), "remote" (http(s) URL), or "core" (Foundry built-in art). Pass onlyExternal to get just the ones a backup would leave behind.\n' +
+          '- "update": rewrite paths after the files have been moved. Pass background and/or foreground and/or tiles [{id, src}]. Paths are relative to the Foundry user data directory. GM-only.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            action: {
+              type: 'string',
+              enum: ['list', 'update'],
+              description: '"list" to audit scene assets, "update" to rewrite their paths.',
+            },
+            sceneIdentifier: {
+              type: 'string',
+              description:
+                'Scene name or ID. Required for "update"; for "list" omit it to scan every scene.',
+            },
+            onlyExternal: {
+              type: 'boolean',
+              description:
+                'For "list": return only assets that would be lost or depend on a remote host (location "external" or "remote"). Default false.',
+            },
+            background: {
+              type: 'string',
+              description: 'For "update": new base-level background path.',
+            },
+            foreground: {
+              type: 'string',
+              description: 'For "update": new base-level foreground (overhead) path.',
+            },
+            tiles: {
+              type: 'array',
+              minItems: 1,
+              description:
+                'For "update": new texture path per tile. Get the ids from the "list" action.',
+              items: {
+                type: 'object',
+                properties: {
+                  id: { type: 'string', description: 'Tile document ID' },
+                  src: { type: 'string', description: 'New texture path, relative to user data' },
+                },
+                required: ['id', 'src'],
+              },
+            },
+          },
+          required: ['action'],
+        },
+      },
+      {
         name: 'plutonium-search',
         description:
           'Search the full 5etools content bundled with the Plutonium module by name (far more content than the SRD compendiums). Supports many categories: creatures, spells, items, feats, backgrounds, races, optional features (invocations, metamagic...), objects, vehicles, traps, hazards, rewards and roll tables. Returns matching names with source book codes, to be used with plutonium-import. Requires the Plutonium module to be active.',
@@ -715,6 +765,39 @@ export class WorldBuilderTools {
     const params = schema.parse(args);
     this.logger.info('Setting scene background', { scene: params.sceneIdentifier });
     return this.query('setSceneBackground', params);
+  }
+
+  async handleManageSceneAssets(args: any): Promise<any> {
+    const schema = z
+      .object({
+        action: z.enum(['list', 'update']),
+        sceneIdentifier: z.string().min(1).optional(),
+        onlyExternal: z.boolean().optional(),
+        background: z.string().min(1).optional(),
+        foreground: z.string().min(1).optional(),
+        tiles: z
+          .array(z.object({ id: z.string().min(1), src: z.string().min(1) }))
+          .min(1)
+          .optional(),
+      })
+      .refine(
+        data =>
+          data.action === 'list' ||
+          data.background !== undefined ||
+          data.foreground !== undefined ||
+          data.tiles !== undefined,
+        { message: '"update" needs background, foreground and/or tiles' }
+      )
+      .refine(data => data.action === 'list' || data.sceneIdentifier !== undefined, {
+        message: '"update" needs sceneIdentifier',
+      });
+
+    const params = schema.parse(args);
+    this.logger.info('Managing scene assets', {
+      action: params.action,
+      scene: params.sceneIdentifier ?? 'all',
+    });
+    return this.query('manageSceneAssets', params);
   }
 
   async handlePlaceTokens(args: any): Promise<any> {

@@ -1780,6 +1780,11 @@ async function startBackend(): Promise<void> {
 
                   break;
 
+                case 'manage-scene-assets':
+                  result = await worldBuilderTools.handleManageSceneAssets(args);
+
+                  break;
+
                 case 'place-tokens':
                   result = await worldBuilderTools.handlePlaceTokens(args);
 

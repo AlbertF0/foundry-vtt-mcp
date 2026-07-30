@@ -164,6 +164,7 @@ export class WorldBuilderHandlers {
     CONFIG.queries[`${PREFIX}.plutoniumSearchMaps`] = this.handlePlutoniumSearchMaps.bind(this);
     CONFIG.queries[`${PREFIX}.plutoniumImportMap`] = this.handlePlutoniumImportMap.bind(this);
     CONFIG.queries[`${PREFIX}.setSceneBackground`] = this.handleSetSceneBackground.bind(this);
+    CONFIG.queries[`${PREFIX}.manageSceneAssets`] = this.handleManageSceneAssets.bind(this);
     CONFIG.queries[`${PREFIX}.plutoniumSearchAdventure`] =
       this.handlePlutoniumSearchAdventure.bind(this);
     CONFIG.queries[`${PREFIX}.placeTokens`] = this.handlePlaceTokens.bind(this);
@@ -900,6 +901,198 @@ export class WorldBuilderHandlers {
     if (!scene) throw new Error(`Scene not found: ${data.sceneIdentifier}`);
     await this.setLevelBackground(scene, data.imagePath.replace(/\\/g, '/'));
     return { success: true, scene: scene.name, imagePath: data.imagePath };
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* Scene assets (background / foreground / tiles)                       */
+  /* ------------------------------------------------------------------ */
+
+  /** Find a scene by id or name (case-insensitive). */
+  private findScene(identifier: string): any {
+    return (
+      game.scenes?.get(identifier) ||
+      game.scenes?.getName(identifier) ||
+      game.scenes?.find((s: any) => s.name?.toLowerCase() === identifier.toLowerCase()) ||
+      null
+    );
+  }
+
+  /**
+   * Where an asset path lives, which is what decides whether a world backup
+   * would carry it along:
+   *  - `world`    inside worlds/<this world>/ — travels with the world
+   *  - `remote`   http(s) URL — depends on someone else's server staying up
+   *  - `core`     Foundry/system built-in art — always present, leave alone
+   *  - `external` anywhere else under Data (moulinette/, modules/, assets/…) — lost on backup
+   */
+  private classifyAssetPath(src: string): 'world' | 'remote' | 'core' | 'external' | 'empty' {
+    if (!src) return 'empty';
+    if (/^https?:\/\//i.test(src)) return 'remote';
+    const decoded = this.decodePath(src);
+    const worldPrefix = `worlds/${(game as any).world?.id}/`;
+    if (decoded.startsWith(worldPrefix)) return 'world';
+    if (/^(icons|ui|systems|cards|sounds)\//i.test(decoded)) return 'core';
+    return 'external';
+  }
+
+  /** Foundry stores asset paths URL-encoded; the filesystem needs them decoded. */
+  private decodePath(src: string): string {
+    try {
+      return decodeURIComponent(src);
+    } catch {
+      return src;
+    }
+  }
+
+  /** Read the tile documents of a scene, whichever schema level holds them. */
+  private getSceneTiles(scene: any): any[] {
+    const collect = (container: any): any[] => {
+      const tiles = container?.tiles;
+      if (!tiles) return [];
+      return typeof tiles.contents !== 'undefined' ? tiles.contents : Array.from(tiles);
+    };
+
+    const direct = collect(scene);
+    if (direct.length > 0) return direct;
+
+    // Fall back to per-level tiles if a future schema moves them there.
+    const levels = scene.levels?.contents ?? [];
+    return levels.flatMap((level: any) => collect(level));
+  }
+
+  /**
+   * Inspect or rewrite the image assets a scene points at: base-level
+   * background and foreground plus every tile texture.
+   *
+   * "list" is the audit pass — with onlyExternal it returns just the assets that
+   * a world backup would leave behind. "update" rewrites the paths after the
+   * caller has moved the files.
+   */
+  async handleManageSceneAssets(data: {
+    action: 'list' | 'update';
+    sceneIdentifier?: string;
+    onlyExternal?: boolean;
+    background?: string;
+    foreground?: string;
+    tiles?: Array<{ id: string; src: string }>;
+  }): Promise<any> {
+    this.assertGM();
+
+    const action = data?.action;
+    if (action !== 'list' && action !== 'update') {
+      throw new Error('action must be "list" or "update"');
+    }
+
+    if (action === 'list') {
+      const onlyExternal = data.onlyExternal === true;
+      const scenes = data.sceneIdentifier
+        ? [this.findScene(data.sceneIdentifier)].filter(Boolean)
+        : Array.from((game.scenes as any) ?? []);
+      if (data.sceneIdentifier && scenes.length === 0) {
+        throw new Error(`Scene not found: ${data.sceneIdentifier}`);
+      }
+
+      const describe = (
+        kind: string,
+        src: string | null | undefined,
+        extra: Record<string, any> = {}
+      ): Record<string, any> | null => {
+        const location = this.classifyAssetPath(src ?? '');
+        if (location === 'empty') return null;
+        if (onlyExternal && location !== 'external' && location !== 'remote') return null;
+        return {
+          kind,
+          src,
+          path: this.decodePath(src ?? ''),
+          location,
+          ...extra,
+        };
+      };
+
+      const result: Array<Record<string, any>> = [];
+      let scenesWithFindings = 0;
+
+      for (const scene of scenes as any[]) {
+        const source = scene._source?.levels?.[0] ?? {};
+        const assets: Array<Record<string, any>> = [];
+
+        const background = describe(
+          'background',
+          source.background?.src ?? scene.background?.src ?? null
+        );
+        if (background) assets.push(background);
+
+        const foreground = describe('foreground', source.foreground?.src ?? null);
+        if (foreground) assets.push(foreground);
+
+        for (const tile of this.getSceneTiles(scene)) {
+          const tileSrc = tile._source?.texture?.src ?? tile.texture?.src ?? null;
+          const entry = describe('tile', tileSrc, { tileId: tile.id });
+          if (entry) assets.push(entry);
+        }
+
+        if (assets.length === 0) continue;
+        scenesWithFindings++;
+        result.push({
+          sceneId: scene.id,
+          sceneName: scene.name,
+          tileCount: this.getSceneTiles(scene).length,
+          assets,
+        });
+      }
+
+      return {
+        world: (game as any).world?.id ?? null,
+        scenesScanned: (scenes as any[]).length,
+        scenesWithFindings,
+        scenes: result,
+      };
+    }
+
+    // ---- update -------------------------------------------------------------
+    if (!data.sceneIdentifier) throw new Error('sceneIdentifier is required for "update"');
+    const scene = this.findScene(data.sceneIdentifier);
+    if (!scene) throw new Error(`Scene not found: ${data.sceneIdentifier}`);
+
+    const applied: Array<Record<string, any>> = [];
+
+    if (data.background) {
+      await this.setLevelBackground(scene, data.background.replace(/\\/g, '/'));
+      applied.push({ kind: 'background', src: data.background });
+    }
+
+    if (data.foreground) {
+      const level = scene.levels?.contents?.[0];
+      if (!level?.id) throw new Error('Scene has no base level to hold a foreground');
+      await scene.updateEmbeddedDocuments('Level', [
+        { _id: level.id, foreground: { src: data.foreground.replace(/\\/g, '/') } },
+      ]);
+      applied.push({ kind: 'foreground', src: data.foreground });
+    }
+
+    if (Array.isArray(data.tiles) && data.tiles.length > 0) {
+      const known = new Map<string, any>(
+        this.getSceneTiles(scene).map((tile: any) => [tile.id, tile])
+      );
+      const patches: Array<Record<string, any>> = [];
+      for (const entry of data.tiles) {
+        if (!entry?.id || !entry?.src) {
+          throw new Error('each tiles[] entry needs "id" and "src"');
+        }
+        if (!known.has(entry.id)) {
+          throw new Error(`Tile "${entry.id}" not found on scene "${scene.name}"`);
+        }
+        patches.push({ _id: entry.id, texture: { src: entry.src.replace(/\\/g, '/') } });
+        applied.push({ kind: 'tile', tileId: entry.id, src: entry.src });
+      }
+      await scene.updateEmbeddedDocuments('Tile', patches);
+    }
+
+    if (applied.length === 0) {
+      throw new Error('nothing to update: pass background, foreground and/or tiles');
+    }
+
+    return { success: true, sceneId: scene.id, sceneName: scene.name, applied };
   }
 
   /* ------------------------------------------------------------------ */

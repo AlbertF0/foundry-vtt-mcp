@@ -143,19 +143,29 @@ export class CharacterTools {
         name: 'manage-world-items',
         description:
           'Manage Item documents in Foundry VTT. Specify the operation with "action":\n' +
+          '- "get": Fetch a single world Item by ID, including its full description HTML.\n' +
           '- "create": Create world-level Items in the sidebar (not actor-attached). Good for reusable libraries. GM-only.\n' +
           '- "list": List world-level Items with optional type/folder/name filters.\n' +
           '- "update": Update existing world-level Items by ID. GM-only.\n' +
           '- "add-to-actor": Create and attach new Items directly to an existing actor. GM-only.\n' +
-          '- "copy-world-item-to-actor": Copy an existing world-level Item (from game.items) into an actor\'s inventory. Pass actorIdentifier and itemIdentifier (name or ID). GM-only.',
+          '- "copy-world-item-to-actor": Copy an existing world-level Item (from game.items) into an actor\'s inventory. Pass actorIdentifier and itemIdentifier (name or ID). GM-only.\n' +
+          '- "propagate-to-actors": Push edited world Items (e.g. after translating them) onto the copies actors already hold. Matching happens inside Foundry by compendium source, then system.identifier, then name; pass "originalName" per item so name matching still works after a rename. Scans world actors plus unlinked scene tokens (item piles). Use dryRun first to preview. GM-only.',
         inputSchema: {
           type: 'object',
           properties: {
             action: {
               type: 'string',
-              enum: ['create', 'list', 'update', 'add-to-actor', 'copy-world-item-to-actor'],
+              enum: [
+                'get',
+                'create',
+                'list',
+                'update',
+                'add-to-actor',
+                'copy-world-item-to-actor',
+                'propagate-to-actors',
+              ],
               description:
-                'Operation to perform: "create" world items, "list" world items, "update" world items by id, "add-to-actor" to create and attach items to an actor, or "copy-world-item-to-actor" to copy an existing world item into an actor.',
+                'Operation to perform: "get" a single item by ID (includes description), "create" world items, "list" world items, "update" world items by id, "add-to-actor" to create and attach items to an actor, "copy-world-item-to-actor" to copy an existing world item into an actor, or "propagate-to-actors" to push edited world items onto the copies actors already hold.',
             },
             items: {
               type: 'array',
@@ -210,6 +220,11 @@ export class CharacterTools {
                 required: ['id'],
               },
             },
+            id: {
+              type: 'string',
+              description:
+                'For "get": the world Item ID to fetch (returns full data including description).',
+            },
             folder: {
               type: 'string',
               description:
@@ -233,6 +248,45 @@ export class CharacterTools {
               type: 'string',
               description:
                 'For "copy-world-item-to-actor": name or ID of the world-level item to copy into the actor.',
+            },
+            propagateItems: {
+              type: 'array',
+              minItems: 1,
+              description:
+                'For "propagate-to-actors": the world items to push onto actor copies. Omit to use "folder" instead (propagates every world item in that folder).',
+              items: {
+                type: 'object',
+                properties: {
+                  id: { type: 'string', description: 'ID of the (already edited) world Item' },
+                  originalName: {
+                    type: 'string',
+                    description:
+                      'The item name BEFORE it was edited/translated. Lets name matching find actor copies that still carry the old name.',
+                  },
+                },
+                required: ['id'],
+              },
+            },
+            fields: {
+              type: 'array',
+              description:
+                'For "propagate-to-actors": which fields to copy onto actor copies. Defaults to ["name","description"]. "description" covers description.value, description.chat and unidentified.description.',
+              items: { type: 'string', enum: ['name', 'description', 'img'] },
+            },
+            includeUnlinkedTokens: {
+              type: 'boolean',
+              description:
+                'For "propagate-to-actors": also update items on unlinked scene tokens, e.g. item piles (default true).',
+            },
+            dryRun: {
+              type: 'boolean',
+              description:
+                'For "propagate-to-actors": report the changes that would be made without writing anything (default false).',
+            },
+            debug: {
+              type: 'boolean',
+              description:
+                'For "propagate-to-actors": include per-field before/after excerpts in each change. Use when a propagation looks like it did not stick.',
             },
           },
           required: ['action'],
@@ -656,11 +710,21 @@ export class CharacterTools {
   async handleManageWorldItems(args: any): Promise<any> {
     const { action } = z
       .object({
-        action: z.enum(['create', 'list', 'update', 'add-to-actor', 'copy-world-item-to-actor']),
+        action: z.enum([
+          'get',
+          'create',
+          'list',
+          'update',
+          'add-to-actor',
+          'copy-world-item-to-actor',
+          'propagate-to-actors',
+        ]),
       })
       .parse(args);
 
     switch (action) {
+      case 'get':
+        return this.handleGetWorldItem(args);
       case 'create':
         return this.handleCreateWorldItems(args);
       case 'list':
@@ -671,6 +735,87 @@ export class CharacterTools {
         return this.handleAddActorItems(args);
       case 'copy-world-item-to-actor':
         return this.handleCopyWorldItemToActor(args);
+      case 'propagate-to-actors':
+        return this.handlePropagateWorldItemsToActors(args);
+    }
+  }
+
+  async handlePropagateWorldItemsToActors(args: any): Promise<any> {
+    const schema = z
+      .object({
+        propagateItems: z
+          .array(
+            z.object({
+              id: z.string().min(1, 'Item id cannot be empty'),
+              originalName: z.string().optional(),
+            })
+          )
+          .min(1)
+          .optional(),
+        folder: z.string().min(1).optional(),
+        fields: z.array(z.enum(['name', 'description', 'img'])).optional(),
+        includeUnlinkedTokens: z.boolean().optional(),
+        dryRun: z.boolean().optional(),
+        debug: z.boolean().optional(),
+      })
+      .refine(data => data.propagateItems !== undefined || data.folder !== undefined, {
+        message: 'Either "propagateItems" or "folder" is required for propagate-to-actors',
+      });
+
+    const { propagateItems, folder, fields, includeUnlinkedTokens, dryRun, debug } =
+      schema.parse(args);
+
+    this.logger.info('Propagating world items to actor copies', {
+      count: propagateItems?.length ?? null,
+      folder: folder ?? null,
+      dryRun: dryRun ?? false,
+    });
+
+    try {
+      const result = await this.foundryClient.query(
+        'foundry-mcp-bridge.propagateWorldItemsToActors',
+        {
+          ...(propagateItems !== undefined ? { items: propagateItems } : {}),
+          ...(folder !== undefined ? { folder } : {}),
+          ...(fields !== undefined ? { fields } : {}),
+          ...(includeUnlinkedTokens !== undefined ? { includeUnlinkedTokens } : {}),
+          ...(dryRun !== undefined ? { dryRun } : {}),
+          ...(debug !== undefined ? { debug } : {}),
+        }
+      );
+
+      this.logger.debug('Successfully propagated world items', {
+        applied: result?.applied ?? 0,
+        changes: result?.changes?.length ?? 0,
+      });
+
+      return result;
+    } catch (error) {
+      this.logger.error('Failed to propagate world items to actors', error);
+      throw new Error(
+        `Failed to propagate world items to actors: ${error instanceof Error ? error.message : 'Unknown error'}`
+      );
+    }
+  }
+
+  async handleGetWorldItem(args: any): Promise<any> {
+    const { id } = z.object({ id: z.string().min(1, 'Item ID cannot be empty') }).parse(args);
+
+    this.logger.info('Getting world item', { id });
+
+    try {
+      const item = await this.foundryClient.query('foundry-mcp-bridge.getWorldItem', { id });
+
+      if (!item) {
+        throw new Error(`Item with ID "${id}" not found`);
+      }
+
+      return item;
+    } catch (error) {
+      this.logger.error('Failed to get world item', error);
+      throw new Error(
+        `Failed to get world item: ${error instanceof Error ? error.message : 'Unknown error'}`
+      );
     }
   }
 

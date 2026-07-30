@@ -47,6 +47,56 @@ class FoundryMCPBridge {
       // Register query handlers
       this.queryHandlers.registerHandlers();
 
+      // Patch: allow copyWorldItemToActor to resolve unlinked scene token IDs (Foundry v14 fix).
+      // data-access.js may be cached in Electron; this override in main.js always runs fresh.
+      const _modulePrefix = 'foundry-mcp-bridge';
+      (CONFIG as any).queries[`${_modulePrefix}.copyWorldItemToActor`] = async (data: any) => {
+        const { actorIdentifier, itemIdentifier } = data;
+        if (!actorIdentifier) throw new Error('actorIdentifier is required');
+        if (!itemIdentifier) throw new Error('itemIdentifier is required');
+
+        // 1. Try sidebar actors (by id or name)
+        let actor: any =
+          (game.actors as any)?.get(actorIdentifier) ||
+          (game.actors as any)?.getName(actorIdentifier) ||
+          Array.from((game.actors as any) || []).find((a: any) =>
+            a.name?.toLowerCase().includes(actorIdentifier.toLowerCase())
+          );
+
+        // 2. Search all scenes for a token with this ID
+        if (!actor) {
+          const current = (game.scenes as any)?.current;
+          const scenes = current
+            ? [
+                current,
+                ...Array.from((game.scenes as any) || []).filter((s: any) => s.id !== current.id),
+              ]
+            : Array.from((game.scenes as any) || []);
+          for (const scene of scenes) {
+            const tokenDoc = (scene as any).tokens?.get(actorIdentifier);
+            if (tokenDoc) {
+              actor = tokenDoc.actor ?? (game.actors as any)?.get(tokenDoc.actorId);
+              if (actor) break;
+            }
+          }
+        }
+
+        if (!actor) throw new Error(`[main-patch] Actor not found: ${actorIdentifier}`);
+
+        const worldItem =
+          (game.items as any)?.get(itemIdentifier) ||
+          (game.items as any)?.getName(itemIdentifier) ||
+          Array.from((game.items as any) || []).find((i: any) =>
+            i.name?.toLowerCase().includes(itemIdentifier.toLowerCase())
+          );
+
+        if (!worldItem) throw new Error(`World item not found: ${itemIdentifier}`);
+
+        const created = await actor.createEmbeddedDocuments('Item', [worldItem.toObject()]);
+        const doc = (created as any[])[0];
+        return { actorId: actor.id, actorName: actor.name, itemId: doc?.id, itemName: doc?.name };
+      };
+
       // Register campaign hooks for interactive dashboards
       this.campaignHooks.register();
 
@@ -512,6 +562,49 @@ Hooks.once('init', async () => {
 
 Hooks.once('ready', async () => {
   try {
+    // Patch copyWorldItemToActor to support unlinked scene token IDs (Foundry v14).
+    // Runs here (ready hook) to ensure it overrides the handler registered during init.
+    (CONFIG as any).queries['foundry-mcp-bridge.copyWorldItemToActor'] = async (data: any) => {
+      const { actorIdentifier, itemIdentifier } = data || {};
+      if (!actorIdentifier) throw new Error('actorIdentifier is required');
+      if (!itemIdentifier) throw new Error('itemIdentifier is required');
+      // 1. Sidebar actors
+      let actor: any =
+        (game.actors as any)?.get(actorIdentifier) ??
+        (game.actors as any)?.getName(actorIdentifier) ??
+        Array.from((game.actors as any) || []).find((a: any) =>
+          a.name?.toLowerCase().includes(actorIdentifier.toLowerCase())
+        );
+      // 2. All scene tokens
+      if (!actor) {
+        const current = (game.scenes as any)?.current;
+        const scenes = current
+          ? [
+              current,
+              ...Array.from((game.scenes as any) || []).filter((s: any) => s.id !== current.id),
+            ]
+          : Array.from((game.scenes as any) || []);
+        for (const scene of scenes) {
+          const tok = (scene as any).tokens?.get(actorIdentifier);
+          if (tok) {
+            actor = tok.actor ?? (game.actors as any)?.get(tok.actorId);
+            if (actor) break;
+          }
+        }
+      }
+      if (!actor) throw new Error(`[ready-patch v0.8.8] Actor not found: ${actorIdentifier}`);
+      const worldItem =
+        (game.items as any)?.get(itemIdentifier) ??
+        (game.items as any)?.getName(itemIdentifier) ??
+        Array.from((game.items as any) || []).find((i: any) =>
+          i.name?.toLowerCase().includes(itemIdentifier.toLowerCase())
+        );
+      if (!worldItem) throw new Error(`World item not found: ${itemIdentifier}`);
+      const created = await actor.createEmbeddedDocuments('Item', [worldItem.toObject()]);
+      const doc = (created as any[])[0];
+      return { actorId: actor.id, actorName: actor.name, itemId: doc?.id, itemName: doc?.name };
+    };
+
     await foundryMCPBridge.onReady();
 
     // Register socket listener for roll state management (after game.user is available)

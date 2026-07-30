@@ -123,6 +123,9 @@ export class QueryHandlers {
     CONFIG.queries[`${modulePrefix}.createWorldItems`] = this.handleCreateWorldItems.bind(this);
     CONFIG.queries[`${modulePrefix}.listWorldItems`] = this.handleListWorldItems.bind(this);
     CONFIG.queries[`${modulePrefix}.updateWorldItems`] = this.handleUpdateWorldItems.bind(this);
+    CONFIG.queries[`${modulePrefix}.getWorldItem`] = this.handleGetWorldItem.bind(this);
+    CONFIG.queries[`${modulePrefix}.propagateWorldItemsToActors`] =
+      this.handlePropagateWorldItemsToActors.bind(this);
 
     // Phase 7: Token manipulation queries
     CONFIG.queries[`${modulePrefix}.move-token`] = this.handleMoveToken.bind(this);
@@ -1614,6 +1617,57 @@ export class QueryHandlers {
     } catch (error) {
       throw new Error(
         `Failed to list world items: ${error instanceof Error ? error.message : 'Unknown error'}`
+      );
+    }
+  }
+
+  private async handlePropagateWorldItemsToActors(data: {
+    items?: Array<{ id: string; originalName?: string }>;
+    folder?: string;
+    fields?: string[];
+    includeUnlinkedTokens?: boolean;
+    dryRun?: boolean;
+    debug?: boolean;
+  }): Promise<any> {
+    try {
+      const gmCheck = this.validateGMAccess();
+      if (!gmCheck.allowed) {
+        return { error: 'Access denied', success: false };
+      }
+
+      this.dataAccess.validateFoundryState();
+
+      const items = Array.isArray(data?.items) && data.items.length > 0 ? data.items : undefined;
+      const folder =
+        typeof data?.folder === 'string' && data.folder.trim().length > 0 ? data.folder : undefined;
+      if (!items && !folder) {
+        throw new Error('Either "items" or "folder" is required');
+      }
+
+      return await this.dataAccess.propagateWorldItemsToActors({
+        ...(items !== undefined ? { items } : {}),
+        ...(folder !== undefined ? { folder } : {}),
+        ...(data.fields !== undefined ? { fields: data.fields } : {}),
+        ...(data.includeUnlinkedTokens !== undefined
+          ? { includeUnlinkedTokens: data.includeUnlinkedTokens }
+          : {}),
+        ...(data.dryRun !== undefined ? { dryRun: data.dryRun } : {}),
+        ...(data.debug !== undefined ? { debug: data.debug } : {}),
+      });
+    } catch (error) {
+      throw new Error(
+        `Failed to propagate world items to actors: ${error instanceof Error ? error.message : 'Unknown error'}`
+      );
+    }
+  }
+
+  private async handleGetWorldItem(data: { id: string }): Promise<any> {
+    try {
+      this.dataAccess.validateFoundryState();
+      return await this.dataAccess.getWorldItem({ id: data.id });
+    } catch (error) {
+      throw new Error(
+        `Failed to get world item: ${error instanceof Error ? error.message : 'Unknown error'}`
       );
     }
   }

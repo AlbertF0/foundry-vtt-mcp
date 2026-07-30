@@ -4515,12 +4515,38 @@ export class FoundryDataAccess {
 
     let actor = this.findActorByIdentifier(actorIdentifier);
     if (!actor) {
-      // Fall back to synthetic token actors in the active scene
-      const token = (canvas as any)?.tokens?.get(actorIdentifier);
-      if (token?.actor) actor = token.actor;
+      // Fall back: search for a token by ID across all scenes.
+      // Use game.scenes.current for the active scene (Foundry v14 API), then iterate the rest.
+      const currentScene = (game.scenes as any)?.current;
+      const allScenes = currentScene
+        ? [
+            currentScene,
+            ...Array.from((game.scenes as any) || []).filter((s: any) => s.id !== currentScene.id),
+          ]
+        : Array.from((game.scenes as any) || []);
+
+      for (const scene of allScenes) {
+        const tokenDoc = (scene as any).tokens?.get(actorIdentifier);
+        if (tokenDoc) {
+          // For unlinked tokens, actor may be a synthetic actor; for linked, it's the real one.
+          actor = tokenDoc.actor ?? game.actors?.get(tokenDoc.actorId);
+          if (actor) break;
+        }
+      }
     }
     if (!actor) {
-      throw new Error(`Actor not found: ${actorIdentifier}`);
+      // Last resort: canvas placeables (requires scene to be rendered)
+      const canvasToken = (canvas as any)?.tokens?.placeables?.find(
+        (t: any) => t.id === actorIdentifier
+      );
+      if (canvasToken?.actor) actor = canvasToken.actor;
+    }
+    if (!actor) {
+      const scenesCount = Array.from((game.scenes as any) || []).length;
+      const currentSceneId = (game.scenes as any)?.current?.id ?? 'none';
+      throw new Error(
+        `[v0.8.6] Actor not found: ${actorIdentifier} | scenes=${scenesCount} | currentScene=${currentSceneId}`
+      );
     }
 
     const worldItem =
@@ -4554,6 +4580,494 @@ export class FoundryDataAccess {
       this.auditLog(
         'copyWorldItemToActor',
         { actorIdentifier, actorId: actor.id, itemIdentifier },
+        'failure',
+        error instanceof Error ? error.message : 'Unknown error'
+      );
+      throw error;
+    }
+  }
+
+  /**
+   * Propagate translated/edited world Items onto the copies actors already hold.
+   *
+   * Matching is done inside Foundry (cheap for the caller): every embedded Item
+   * on every actor is keyed by compendium source → system.identifier → name, and
+   * looked up against the supplied world Items. `originalName` lets the caller
+   * pass the pre-edit name so name matching still works after a rename.
+   *
+   * Scope covers world actors plus unlinked scene tokens. For unlinked tokens
+   * only items that live in the token's own ActorDelta are touched — inherited
+   * items already follow their base actor, so patching them would just bloat the
+   * delta.
+   */
+  async propagateWorldItemsToActors(params: {
+    items?: Array<{ id: string; originalName?: string }>;
+    folder?: string;
+    fields?: string[];
+    includeUnlinkedTokens?: boolean;
+    dryRun?: boolean;
+    debug?: boolean;
+  }): Promise<{
+    dryRun: boolean;
+    worldItems: number;
+    scanned: { actors: number; tokens: number };
+    matched: number;
+    applied: number;
+    writtenDocs: number;
+    summary: Array<{ actorName: string; sceneName?: string; count: number }>;
+    changes: Array<{
+      actorId: string;
+      actorName: string;
+      tokenId?: string;
+      sceneName?: string;
+      itemId: string;
+      from: string;
+      to: string;
+      matchedBy: string;
+      fields: string[];
+      diffs?: Array<Record<string, string>>;
+    }>;
+    changesOmitted: number;
+    ambiguousKeysIgnored: { compendiumSource: number; identifier: number; name: number };
+    unmatchedWorldItems: Array<{ id: string; name: string }>;
+  }> {
+    this.validateFoundryState();
+
+    const fields =
+      params.fields && params.fields.length > 0 ? params.fields : ['name', 'description'];
+    const wantName = fields.includes('name');
+    const wantDescription = fields.includes('description');
+    const wantImg = fields.includes('img');
+    const dryRun = params.dryRun === true;
+    const debug = params.debug === true;
+    const includeUnlinkedTokens = params.includeUnlinkedTokens !== false;
+
+    // ---- Resolve the set of source world items -------------------------------
+    const sources: Array<{ item: any; originalName?: string }> = [];
+
+    if (Array.isArray(params.items) && params.items.length > 0) {
+      for (const entry of params.items) {
+        if (!entry || typeof entry.id !== 'string' || entry.id.trim().length === 0) {
+          throw new Error('items[]: each entry requires a non-empty "id"');
+        }
+        const item = (game as any).items?.get(entry.id);
+        if (!item) {
+          throw new Error(`World item "${entry.id}" not found`);
+        }
+        sources.push({ item, ...(entry.originalName ? { originalName: entry.originalName } : {}) });
+      }
+    } else if (params.folder && params.folder.trim().length > 0) {
+      const folderTrimmed = params.folder.trim();
+      const folderDoc =
+        (game as any).folders?.find(
+          (f: any) => f.type === 'Item' && (f.name === folderTrimmed || f.id === folderTrimmed)
+        ) ?? null;
+      if (!folderDoc) {
+        throw new Error(`Item folder "${folderTrimmed}" not found`);
+      }
+      for (const item of (game as any).items) {
+        if (item.folder?.id === folderDoc.id) sources.push({ item });
+      }
+    } else {
+      throw new Error('Either "items" or "folder" is required');
+    }
+
+    if (sources.length === 0) {
+      return {
+        dryRun,
+        worldItems: 0,
+        scanned: { actors: 0, tokens: 0 },
+        matched: 0,
+        applied: 0,
+        writtenDocs: 0,
+        summary: [],
+        changes: [],
+        changesOmitted: 0,
+        ambiguousKeysIgnored: { compendiumSource: 0, identifier: 0, name: 0 },
+        unmatchedWorldItems: [],
+      };
+    }
+
+    // ---- Build lookup indexes ------------------------------------------------
+    const compendiumSourceOf = (doc: any): string | null =>
+      doc?._stats?.compendiumSource ?? doc?.flags?.core?.sourceId ?? null;
+
+    // A key only identifies an item if it is unique across the whole Items
+    // sidebar. Items authored through this bridge all share
+    // system.identifier === "new-item", so an ambiguous key must be discarded
+    // rather than trusted — otherwise every homebrew item matches the first one.
+    const sourceCounts = new Map<string, number>();
+    const identifierCounts = new Map<string, number>();
+    const nameCounts = new Map<string, number>();
+    const bump = (map: Map<string, number>, key: string | null | undefined): void => {
+      if (!key) return;
+      map.set(key, (map.get(key) ?? 0) + 1);
+    };
+
+    for (const item of (game as any).items) {
+      bump(sourceCounts, compendiumSourceOf(item));
+      bump(identifierCounts, item.system?.identifier);
+      bump(nameCounts, (item.name ?? '').toLowerCase());
+    }
+
+    const ambiguousKeys = { compendiumSource: 0, identifier: 0, name: 0 };
+
+    const bySource = new Map<string, any>();
+    const byIdentifier = new Map<string, any>();
+    const byName = new Map<string, any>();
+
+    /** Add a key → item entry unless the key is ambiguous anywhere. */
+    const index = (
+      map: Map<string, any>,
+      counts: Map<string, number>,
+      key: string | null | undefined,
+      item: any,
+      kind: 'compendiumSource' | 'identifier' | 'name'
+    ): void => {
+      if (!key) return;
+      if ((counts.get(key) ?? 0) > 1) {
+        ambiguousKeys[kind]++;
+        return;
+      }
+      const existing = map.get(key);
+      if (existing && existing.id !== item.id) {
+        map.delete(key); // two sources claim it: unusable
+        ambiguousKeys[kind]++;
+        return;
+      }
+      map.set(key, item);
+    };
+
+    for (const { item, originalName } of sources) {
+      index(bySource, sourceCounts, compendiumSourceOf(item), item, 'compendiumSource');
+      index(byIdentifier, identifierCounts, item.system?.identifier, item, 'identifier');
+      index(byName, nameCounts, (item.name ?? '').toLowerCase(), item, 'name');
+      if (originalName) {
+        // Caller-supplied pre-edit name: no world item carries it any more, so
+        // it cannot be counted — but reject it if it collides with a live name.
+        const orig = originalName.toLowerCase();
+        if (orig && (nameCounts.get(orig) ?? 0) === 0) {
+          index(byName, nameCounts, orig, item, 'name');
+        }
+      }
+    }
+
+    const matchItem = (embedded: any): { source: any; matchedBy: string } | null => {
+      const candidates: Array<[any, string]> = [];
+
+      const src = compendiumSourceOf(embedded);
+      if (src && bySource.has(src)) candidates.push([bySource.get(src), 'compendiumSource']);
+
+      const ident = embedded.system?.identifier;
+      if (ident && byIdentifier.has(ident))
+        candidates.push([byIdentifier.get(ident), 'identifier']);
+
+      const name = (embedded.name ?? '').toLowerCase();
+      if (name && byName.has(name)) candidates.push([byName.get(name), 'name']);
+
+      for (const [source, matchedBy] of candidates) {
+        // Type must agree: a key collision across item types is never a real match.
+        if (source.type !== embedded.type) continue;
+        return { source, matchedBy };
+      }
+      return null;
+    };
+
+    const snip = (value: unknown): string =>
+      typeof value === 'string' ? value.slice(0, 160) : JSON.stringify(value ?? null);
+
+    /**
+     * Compare HTML for equality only — never for writing.
+     *
+     * Foundry normalises markup when it stores an HTMLField: a source item
+     * holding `<br />` comes back as `<br>` once written to an actor copy. Compared
+     * verbatim, such an item looks perpetually out of date and gets rewritten on
+     * every run, so equality is decided on normalised markup while the source's
+     * original HTML is what actually gets written.
+     */
+    const normalizeHtml = (html: unknown): string =>
+      String(html ?? '')
+        .replace(/\s*\/>/g, '>')
+        .replace(/\s+/g, ' ')
+        .trim();
+
+    /** Visible text only: immune to any markup rewriting Foundry may apply. */
+    const textOf = (html: unknown): string =>
+      String(html ?? '')
+        .replace(/<[^>]*>/g, ' ')
+        .replace(/&nbsp;/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+
+    // Equal markup or equal visible text both count as "already in sync". The
+    // trade-off is deliberate: a formatting-only edit (adding <strong>, turning a
+    // paragraph into a list) will not propagate, while every wording change does —
+    // and wording is what translating and describing items actually changes.
+    const sameHtml = (a: unknown, b: unknown): boolean =>
+      normalizeHtml(a) === normalizeHtml(b) || textOf(a) === textOf(b);
+
+    /** Where two normalised strings first diverge, with surrounding context. */
+    const divergence = (a: unknown, b: unknown): Record<string, string> => {
+      const na = normalizeHtml(a);
+      const nb = normalizeHtml(b);
+      let i = 0;
+      while (i < na.length && i < nb.length && na[i] === nb[i]) i++;
+      const from = Math.max(0, i - 30);
+      return {
+        normLen: `${na.length} vs ${nb.length}`,
+        firstDiffAt: String(i),
+        normBefore: na.slice(from, i + 50),
+        normAfter: nb.slice(from, i + 50),
+      };
+    };
+
+    /** Build the patch for one embedded item, or null when nothing would change. */
+    const buildPatch = (
+      embedded: any,
+      source: any
+    ): {
+      patch: Record<string, any>;
+      fields: string[];
+      diffs: Array<Record<string, string>>;
+    } | null => {
+      const patch: Record<string, any> = { _id: embedded.id };
+      const fields: string[] = [];
+      const diffs: Array<Record<string, string>> = [];
+
+      const note = (field: string, before: unknown, after: unknown): void => {
+        fields.push(field);
+        diffs.push({ field, before: snip(before), after: snip(after) });
+      };
+
+      // Read names from _source: on an unidentified dnd5e item the `name` getter
+      // returns system.unidentified.name, so patching `name` with it would write
+      // the masked label into the real name field.
+      const sourceName = source._source?.name ?? source.name;
+      const embeddedName = embedded._source?.name ?? embedded.name;
+      if (wantName && sourceName && sourceName !== embeddedName) {
+        patch.name = sourceName;
+        note('name', embeddedName, sourceName);
+      }
+
+      // The masked name is what players actually read on an unidentified item,
+      // so it has to travel with the real one or the copy keeps the old label.
+      if (wantName) {
+        const srcUnidentifiedName = source.system?.unidentified?.name;
+        if (
+          srcUnidentifiedName !== undefined &&
+          embedded.system?.unidentified !== undefined &&
+          srcUnidentifiedName !== embedded.system?.unidentified?.name
+        ) {
+          patch.system = {
+            ...(patch.system ?? {}),
+            unidentified: {
+              ...((patch.system?.unidentified as Record<string, any>) ?? {}),
+              name: srcUnidentifiedName,
+            },
+          };
+          note('unidentified.name', embedded.system?.unidentified?.name, srcUnidentifiedName);
+        }
+      }
+
+      if (wantImg && source.img && source.img !== embedded.img) {
+        patch.img = source.img;
+        note('img', embedded.img, source.img);
+      }
+
+      if (wantDescription) {
+        const description: Record<string, any> = {};
+        const srcValue = source.system?.description?.value;
+        const srcChat = source.system?.description?.chat;
+        if (srcValue !== undefined && !sameHtml(srcValue, embedded.system?.description?.value)) {
+          description.value = srcValue;
+          note('description.value', embedded.system?.description?.value, srcValue);
+          if (debug) {
+            diffs.push({
+              field: 'description.value/normalised',
+              ...divergence(embedded.system?.description?.value, srcValue),
+            });
+          }
+        }
+        if (srcChat !== undefined && !sameHtml(srcChat, embedded.system?.description?.chat)) {
+          description.chat = srcChat;
+          note('description.chat', embedded.system?.description?.chat, srcChat);
+        }
+        if (Object.keys(description).length > 0) {
+          patch.system = { ...(patch.system ?? {}), description };
+        }
+
+        const srcUnidentified = source.system?.unidentified?.description;
+        if (
+          srcUnidentified !== undefined &&
+          embedded.system?.unidentified !== undefined &&
+          !sameHtml(srcUnidentified, embedded.system?.unidentified?.description)
+        ) {
+          patch.system = {
+            ...(patch.system ?? {}),
+            unidentified: {
+              ...((patch.system?.unidentified as Record<string, any>) ?? {}),
+              description: srcUnidentified,
+            },
+          };
+          note(
+            'unidentified.description',
+            embedded.system?.unidentified?.description,
+            srcUnidentified
+          );
+        }
+      }
+
+      return fields.length > 0 ? { patch, fields, diffs } : null;
+    };
+
+    const changes: Array<{
+      actorId: string;
+      actorName: string;
+      tokenId?: string;
+      sceneName?: string;
+      itemId: string;
+      from: string;
+      to: string;
+      matchedBy: string;
+      fields: string[];
+      diffs?: Array<Record<string, string>>;
+    }> = [];
+    const matchedSourceIds = new Set<string>();
+    let applied = 0;
+    let writtenDocs = 0;
+    let actorsScanned = 0;
+    let tokensScanned = 0;
+
+    /** Collect + optionally apply patches for one actor (real or synthetic). */
+    const processActor = async (
+      actor: any,
+      context: { tokenId?: string; sceneName?: string; onlyItemIds?: Set<string> }
+    ): Promise<void> => {
+      if (!actor?.items) return;
+
+      const patches: Array<Record<string, any>> = [];
+
+      for (const embedded of actor.items) {
+        if (context.onlyItemIds && !context.onlyItemIds.has(embedded.id)) continue;
+
+        const match = matchItem(embedded);
+        if (!match) continue;
+        matchedSourceIds.add(match.source.id);
+
+        const built = buildPatch(embedded, match.source);
+        if (!built) continue;
+
+        patches.push(built.patch);
+        changes.push({
+          actorId: actor.id,
+          actorName: actor.name,
+          ...(context.tokenId ? { tokenId: context.tokenId } : {}),
+          ...(context.sceneName ? { sceneName: context.sceneName } : {}),
+          itemId: embedded.id,
+          from: embedded.name,
+          to: built.patch.name ?? embedded.name,
+          matchedBy: match.matchedBy,
+          fields: built.fields,
+          ...(debug ? { diffs: built.diffs } : {}),
+        });
+      }
+
+      if (patches.length > 0 && !dryRun) {
+        const updated = await actor.updateEmbeddedDocuments('Item', patches);
+        applied += patches.length;
+        // Foundry reports what it actually wrote; a short count means the write
+        // was rejected or diffed away (typical on unlinked-token deltas).
+        writtenDocs += Array.isArray(updated) ? updated.length : 0;
+      }
+    };
+
+    try {
+      for (const actor of (game as any).actors ?? []) {
+        actorsScanned++;
+        await processActor(actor, {});
+      }
+
+      if (includeUnlinkedTokens) {
+        for (const scene of (game as any).scenes ?? []) {
+          for (const tokenDoc of (scene as any).tokens ?? []) {
+            if (tokenDoc.actorLink !== false) continue; // linked tokens follow their base actor
+            const synthetic = tokenDoc.actor;
+            if (!synthetic) continue;
+            tokensScanned++;
+
+            // Restrict to the token's own delta items when we can read them.
+            let onlyItemIds: Set<string> | undefined;
+            try {
+              const deltaItems = tokenDoc.delta?.items;
+              if (deltaItems) {
+                onlyItemIds = new Set<string>();
+                for (const deltaItem of deltaItems) {
+                  const id = deltaItem?.id ?? deltaItem?._id;
+                  if (id) onlyItemIds.add(id);
+                }
+              }
+            } catch {
+              onlyItemIds = undefined;
+            }
+
+            await processActor(synthetic, {
+              tokenId: tokenDoc.id,
+              sceneName: (scene as any).name,
+              ...(onlyItemIds ? { onlyItemIds } : {}),
+            });
+          }
+        }
+      }
+
+      const unmatchedWorldItems = sources
+        .filter(({ item }) => !matchedSourceIds.has(item.id))
+        .map(({ item }) => ({ id: item.id, name: item.name }));
+
+      // Roll up per holder so the caller gets the whole picture cheaply, and cap
+      // the per-item detail: a folder-wide run can touch hundreds of items.
+      const summaryMap = new Map<
+        string,
+        { actorName: string; sceneName?: string; count: number }
+      >();
+      for (const change of changes) {
+        const key = `${change.actorId}|${change.tokenId ?? ''}`;
+        const entry = summaryMap.get(key);
+        if (entry) {
+          entry.count++;
+        } else {
+          summaryMap.set(key, {
+            actorName: change.actorName,
+            ...(change.sceneName ? { sceneName: change.sceneName } : {}),
+            count: 1,
+          });
+        }
+      }
+
+      const MAX_CHANGES = 40;
+      const result = {
+        dryRun,
+        worldItems: sources.length,
+        scanned: { actors: actorsScanned, tokens: tokensScanned },
+        matched: changes.length,
+        applied,
+        writtenDocs,
+        summary: Array.from(summaryMap.values()),
+        changes: changes.slice(0, MAX_CHANGES),
+        changesOmitted: Math.max(0, changes.length - MAX_CHANGES),
+        ambiguousKeysIgnored: ambiguousKeys,
+        unmatchedWorldItems,
+      };
+
+      this.auditLog(
+        'propagateWorldItemsToActors',
+        { worldItems: sources.length, applied, dryRun },
+        'success'
+      );
+      return result;
+    } catch (error) {
+      this.auditLog(
+        'propagateWorldItemsToActors',
+        { worldItems: sources.length, applied, dryRun },
         'failure',
         error instanceof Error ? error.message : 'Unknown error'
       );
@@ -4619,6 +5133,36 @@ export class FoundryDataAccess {
     }
 
     return result;
+  }
+
+  /**
+   * Get a single world-level Item by ID, including its full description HTML.
+   */
+  async getWorldItem(params: { id: string }): Promise<{
+    id: string;
+    name: string;
+    type: string;
+    img?: string;
+    folderId: string | null;
+    folderName: string | null;
+    description: string | null;
+    system: Record<string, any>;
+  } | null> {
+    this.validateFoundryState();
+
+    const item = (game as any).items?.get(params.id);
+    if (!item) return null;
+
+    return {
+      id: item.id ?? '',
+      name: item.name ?? '',
+      type: item.type,
+      ...(item.img ? { img: item.img } : {}),
+      folderId: item.folder?.id ?? null,
+      folderName: item.folder?.name ?? null,
+      description: item.system?.description?.value ?? null,
+      system: item.system ? JSON.parse(JSON.stringify(item.system)) : {},
+    };
   }
 
   /**
