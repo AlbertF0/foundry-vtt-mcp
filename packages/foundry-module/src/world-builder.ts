@@ -1696,11 +1696,22 @@ export class WorldBuilderHandlers {
       }
     }
 
+    // Snapshot the collection before importing. Plutonium's importers don't
+    // reliably hand back the document they created, and looking it up by name
+    // afterwards is unsafe: getName() returns the FIRST match, which is a
+    // pre-existing world document whenever the world already holds something
+    // named like the compendium entry (importing "Guard" into a world that
+    // already has a "Guard"). Post-processing then renamed/moved the wrong
+    // document. Diffing IDs tells us exactly what this import created.
+    const collection = (game as any)[cfg.collection];
+    const idsBefore = new Set<string>(collection?.map((d: any) => d.id) ?? []);
+
     // Import: prefer the category-specific public API, fall back to the generic importer
+    let importMeta: any;
     if (category === 'creature' && api.importer?.creature?.pImportEntry) {
-      await api.importer.creature.pImportEntry(entry);
+      importMeta = await api.importer.creature.pImportEntry(entry);
     } else if (category === 'spell' && api.importer?.spell?.pImportEntry) {
-      await api.importer.spell.pImportEntry(entry);
+      importMeta = await api.importer.spell.pImportEntry(entry);
     } else {
       if (!api.importer?.pGetImporter) throw new Error('Plutonium importer API not available');
       const importer = await api.importer.pGetImporter({ prop: cfg.importerProp });
@@ -1708,16 +1719,31 @@ export class WorldBuilderHandlers {
         throw new Error(`Plutonium has no importer for category "${category}"`);
       }
       const ImportOpts = api.importer.ImportOpts;
-      await importer.pImportEntry(entry, ImportOpts ? new ImportOpts({}) : undefined);
+      importMeta = await importer.pImportEntry(entry, ImportOpts ? new ImportOpts({}) : undefined);
     }
 
-    // Locate the imported document for post-processing
-    const collection = (game as any)[cfg.collection];
-    const doc = collection?.getName(data.name) ?? collection?.getName(entry.name);
+    // Locate the imported document for post-processing. Only ever consider
+    // documents that did not exist before this call, so a pre-existing one can
+    // never be renamed or moved.
+    const created: any[] = collection?.filter((d: any) => !idsBefore.has(d.id)) ?? [];
+    const metaDoc = importMeta?.imported?.[0]?.document;
+    const doc =
+      created.find((d: any) => d.name === entry.name) ??
+      created.find((d: any) => d.name === data.name) ??
+      (created.length === 1 ? created[0] : undefined) ??
+      (metaDoc?.id && !idsBefore.has(metaDoc.id) ? metaDoc : undefined);
+
     if (!doc?.id) {
+      // Nothing new landed in the collection — most likely Plutonium skipped the
+      // import because a document with that name is already there. Leave it
+      // alone instead of renaming/moving a document we did not create.
+      const existing = collection?.getName(data.name) ?? collection?.getName(entry.name);
       return {
         success: true,
-        warning: 'Import ran but the created document could not be located for post-processing',
+        warning: existing
+          ? `Import created no new document; "${existing.name}" already exists and was left untouched (customName/folderName not applied).`
+          : 'Import ran but the created document could not be located for post-processing',
+        existingId: existing?.id ?? null,
         name: entry.name,
         source: entry.source,
         category,
