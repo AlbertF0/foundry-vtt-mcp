@@ -4499,6 +4499,82 @@ export class FoundryDataAccess {
   }
 
   /**
+   * Update one or more of an actor's own embedded Item documents (spells,
+   * feats, equipment...) directly by id. Unlike propagateWorldItemsToActors,
+   * this does not need a matching world Item — it patches the actor's copy
+   * in place, which is what translating or correcting a PC's existing spells
+   * requires.
+   */
+  async updateActorItems(params: {
+    actorIdentifier: string;
+    updates: Array<{
+      id: string;
+      name?: string;
+      img?: string;
+      system?: Record<string, any>;
+    }>;
+  }): Promise<{
+    actorId: string;
+    actorName: string;
+    updated: Array<{ id: string; name: string; type: string }>;
+  }> {
+    this.validateFoundryState();
+
+    const { actorIdentifier, updates } = params;
+    if (!actorIdentifier) throw new Error('actorIdentifier is required');
+    if (!Array.isArray(updates) || updates.length === 0) {
+      throw new Error('updates array is required and must contain at least one entry');
+    }
+
+    const actor = this.findActorByIdentifier(actorIdentifier);
+    if (!actor) throw new Error(`Actor not found: ${actorIdentifier}`);
+
+    const payload = updates.map((upd, idx) => {
+      if (!upd || typeof upd.id !== 'string' || upd.id.trim().length === 0) {
+        throw new Error(`updates[${idx}]: "id" is required and must be a non-empty string`);
+      }
+      const embedded = actor.items?.get(upd.id);
+      if (!embedded) {
+        throw new Error(`updates[${idx}]: Item "${upd.id}" not found on actor "${actor.name}"`);
+      }
+      const patch: Record<string, any> = { _id: upd.id };
+      if (upd.name !== undefined) patch.name = upd.name;
+      if (upd.img !== undefined) patch.img = upd.img;
+      if (upd.system !== undefined) patch.system = upd.system;
+      return patch;
+    });
+
+    try {
+      const updated = await actor.updateEmbeddedDocuments('Item', payload);
+
+      const result = {
+        actorId: actor.id,
+        actorName: actor.name,
+        updated: (updated || []).map((doc: any) => ({
+          id: doc.id,
+          name: doc.name,
+          type: doc.type,
+        })),
+      };
+
+      this.auditLog(
+        'updateActorItems',
+        { actorIdentifier, actorId: actor.id, count: payload.length },
+        'success'
+      );
+      return result;
+    } catch (error) {
+      this.auditLog(
+        'updateActorItems',
+        { actorIdentifier, actorId: actor.id, count: payload.length },
+        'failure',
+        error instanceof Error ? error.message : 'Unknown error'
+      );
+      throw error;
+    }
+  }
+
+  /**
    * Copy an existing world-level Item into an actor's embedded item collection.
    * Looks up the world item by name or ID, then calls createEmbeddedDocuments so
    * the actor gets a full copy of the item data.

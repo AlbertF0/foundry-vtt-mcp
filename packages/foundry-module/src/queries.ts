@@ -116,6 +116,7 @@ export class QueryHandlers {
 
     // Item authoring on actor sheets
     CONFIG.queries[`${modulePrefix}.addActorItems`] = this.handleAddActorItems.bind(this);
+    CONFIG.queries[`${modulePrefix}.updateActorItems`] = this.handleUpdateActorItems.bind(this);
     CONFIG.queries[`${modulePrefix}.copyWorldItemToActor`] =
       this.handleCopyWorldItemToActor.bind(this);
 
@@ -1533,6 +1534,41 @@ export class QueryHandlers {
     } catch (error) {
       throw new Error(
         `Failed to add actor items: ${error instanceof Error ? error.message : 'Unknown error'}`
+      );
+    }
+  }
+
+  private async handleUpdateActorItems(data: {
+    actorIdentifier: string;
+    updates: Array<{
+      id: string;
+      name?: string;
+      img?: string;
+      system?: Record<string, any>;
+    }>;
+  }): Promise<any> {
+    try {
+      const gmCheck = this.validateGMAccess();
+      if (!gmCheck.allowed) {
+        return { error: 'Access denied', success: false };
+      }
+
+      this.dataAccess.validateFoundryState();
+
+      if (!data?.actorIdentifier) {
+        throw new Error('actorIdentifier is required');
+      }
+      if (!Array.isArray(data?.updates) || data.updates.length === 0) {
+        throw new Error('updates array is required and must contain at least one entry');
+      }
+
+      return await this.dataAccess.updateActorItems({
+        actorIdentifier: data.actorIdentifier,
+        updates: data.updates,
+      });
+    } catch (error) {
+      throw new Error(
+        `Failed to update actor items: ${error instanceof Error ? error.message : 'Unknown error'}`
       );
     }
   }

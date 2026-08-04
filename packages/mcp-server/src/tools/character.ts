@@ -148,6 +148,7 @@ export class CharacterTools {
           '- "list": List world-level Items with optional type/folder/name filters.\n' +
           '- "update": Update existing world-level Items by ID. GM-only.\n' +
           '- "add-to-actor": Create and attach new Items directly to an existing actor. GM-only.\n' +
+          '- "update-actor-items": Update an actor\'s OWN embedded Items in place (e.g. correcting or translating a PC\'s existing spells/feats/equipment) — no matching world Item needed, unlike propagate-to-actors. Pass actorIdentifier and updates. GM-only.\n' +
           '- "copy-world-item-to-actor": Copy an existing world-level Item (from game.items) into an actor\'s inventory. Pass actorIdentifier and itemIdentifier (name or ID). GM-only.\n' +
           '- "propagate-to-actors": Push edited world Items (e.g. after translating them) onto the copies actors already hold. Matching happens inside Foundry by compendium source, then system.identifier, then name; pass "originalName" per item so name matching still works after a rename. Scans world actors plus unlinked scene tokens (item piles). Use dryRun first to preview. GM-only.',
         inputSchema: {
@@ -161,11 +162,12 @@ export class CharacterTools {
                 'list',
                 'update',
                 'add-to-actor',
+                'update-actor-items',
                 'copy-world-item-to-actor',
                 'propagate-to-actors',
               ],
               description:
-                'Operation to perform: "get" a single item by ID (includes description), "create" world items, "list" world items, "update" world items by id, "add-to-actor" to create and attach items to an actor, "copy-world-item-to-actor" to copy an existing world item into an actor, or "propagate-to-actors" to push edited world items onto the copies actors already hold.',
+                'Operation to perform: "get" a single item by ID (includes description), "create" world items, "list" world items, "update" world items by id, "add-to-actor" to create and attach items to an actor, "update-actor-items" to edit an actor\'s own embedded items in place, "copy-world-item-to-actor" to copy an existing world item into an actor, or "propagate-to-actors" to push edited world items onto the copies actors already hold.',
             },
             items: {
               type: 'array',
@@ -199,11 +201,15 @@ export class CharacterTools {
               type: 'array',
               minItems: 1,
               description:
-                'Required for "update". One or more item patches. Each entry must include "id" plus at least one field to change (name, img, system, folder).',
+                'Required for "update" and "update-actor-items". One or more item patches. Each entry must include "id" plus at least one field to change (name, img, system; "update" also accepts folder).',
               items: {
                 type: 'object',
                 properties: {
-                  id: { type: 'string', description: 'ID of the world Item to update' },
+                  id: {
+                    type: 'string',
+                    description:
+                      'ID of the item to update — a world Item for "update", or an item embedded on actorIdentifier for "update-actor-items"',
+                  },
                   name: { type: 'string', description: 'New display name' },
                   img: { type: 'string', description: 'New icon path' },
                   system: {
@@ -214,7 +220,8 @@ export class CharacterTools {
                   },
                   folder: {
                     type: 'string',
-                    description: 'Move item into this folder (name or ID). Created if absent.',
+                    description:
+                      'For "update" only: move item into this folder (name or ID). Created if absent.',
                   },
                 },
                 required: ['id'],
@@ -242,7 +249,7 @@ export class CharacterTools {
             actorIdentifier: {
               type: 'string',
               description:
-                'For "add-to-actor" and "copy-world-item-to-actor": actor name or ID to receive the items.',
+                'For "add-to-actor", "update-actor-items" and "copy-world-item-to-actor": the actor name or ID.',
             },
             itemIdentifier: {
               type: 'string',
@@ -594,6 +601,47 @@ export class CharacterTools {
     }
   }
 
+  async handleUpdateActorItems(args: any): Promise<any> {
+    const updateEntrySchema = z.object({
+      id: z.string().min(1, 'Item id cannot be empty'),
+      name: z.string().optional(),
+      img: z.string().optional(),
+      system: z.record(z.any()).optional(),
+    });
+
+    const schema = z.object({
+      actorIdentifier: z.string().min(1, 'Actor identifier cannot be empty'),
+      updates: z.array(updateEntrySchema).min(1, 'At least one update entry is required'),
+    });
+
+    const { actorIdentifier, updates } = schema.parse(args);
+
+    this.logger.info('Updating actor items', {
+      actorIdentifier,
+      count: updates.length,
+      ids: updates.map(u => u.id),
+    });
+
+    try {
+      const result = await this.foundryClient.query('foundry-mcp-bridge.updateActorItems', {
+        actorIdentifier,
+        updates,
+      });
+
+      this.logger.debug('Successfully updated actor items', {
+        actorName: result.actorName,
+        updated: result.updated?.length ?? 0,
+      });
+
+      return result;
+    } catch (error) {
+      this.logger.error('Failed to update actor items', error);
+      throw new Error(
+        `Failed to update items on "${actorIdentifier}": ${error instanceof Error ? error.message : 'Unknown error'}`
+      );
+    }
+  }
+
   async handleUpdateWorldItems(args: any): Promise<any> {
     const updateEntrySchema = z.object({
       id: z.string().min(1, 'Item id cannot be empty'),
@@ -716,6 +764,7 @@ export class CharacterTools {
           'list',
           'update',
           'add-to-actor',
+          'update-actor-items',
           'copy-world-item-to-actor',
           'propagate-to-actors',
         ]),
@@ -733,6 +782,8 @@ export class CharacterTools {
         return this.handleUpdateWorldItems(args);
       case 'add-to-actor':
         return this.handleAddActorItems(args);
+      case 'update-actor-items':
+        return this.handleUpdateActorItems(args);
       case 'copy-world-item-to-actor':
         return this.handleCopyWorldItemToActor(args);
       case 'propagate-to-actors':
