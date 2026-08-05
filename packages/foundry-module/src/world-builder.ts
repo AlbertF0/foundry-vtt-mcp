@@ -1511,6 +1511,7 @@ export class WorldBuilderHandlers {
     tokenImg?: string;
     folderName?: string;
     newName?: string;
+    biography?: string;
   }): Promise<any> {
     this.assertGM();
     if (!data?.actorIdentifier) throw new Error('actorIdentifier is required');
@@ -1532,6 +1533,11 @@ export class WorldBuilderHandlers {
       const folder = await this.getOrCreateFolder(data.folderName, 'Actor');
       update.folder = folder.id;
     }
+    if (data.biography !== undefined) {
+      // dnd5e / pf2e both keep prose biography at this path. Systems without it
+      // (e.g. dsa5) simply ignore the extra key — Foundry stores it inert.
+      update['system.details.biography.value'] = data.biography;
+    }
     if (Object.keys(update).length === 0) throw new Error('Nothing to update');
 
     await actor.update(update);
@@ -1541,7 +1547,8 @@ export class WorldBuilderHandlers {
       name: actor.name,
       img: actor.img,
       tokenImg: actor.prototypeToken?.texture?.src ?? null,
-      folder: data.folderName ?? null,
+      folder: actor.folder?.name ?? null,
+      biography: actor.system?.details?.biography?.value ?? null,
     };
   }
 

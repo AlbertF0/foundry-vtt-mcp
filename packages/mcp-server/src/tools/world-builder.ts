@@ -124,7 +124,7 @@ export class WorldBuilderTools {
       {
         name: 'update-actor',
         description:
-          "Update an existing actor's portrait image, prototype token image, sidebar folder and/or name. Use this to assign user-provided artwork to actors and organize them into folders. Image paths are relative to the Foundry user data directory.",
+          "Update an existing actor's portrait image, prototype token image, sidebar folder, name and/or biography. Use this to assign user-provided artwork to actors, organize them into folders, and write prose bio/notes onto an actor that already exists (e.g. one imported from Plutonium). Image paths are relative to the Foundry user data directory.",
         inputSchema: {
           type: 'object',
           properties: {
@@ -139,6 +139,11 @@ export class WorldBuilderTools {
               description: 'Actor folder to move the actor into; created automatically if missing',
             },
             newName: { type: 'string', description: 'Rename the actor' },
+            biography: {
+              type: 'string',
+              description:
+                'Prose biography/notes (HTML allowed). Written to the "Details" tab of the actor sheet (system.details.biography.value on dnd5e/pf2e). Overwrites whatever is already there.',
+            },
           },
           required: ['actorIdentifier'],
         },
@@ -653,6 +658,7 @@ export class WorldBuilderTools {
       tokenImg: z.string().optional(),
       folderName: z.string().optional(),
       newName: z.string().optional(),
+      biography: z.string().optional(),
     });
     const params = schema.parse(args);
     this.logger.info('Updating actor assets', { actor: params.actorIdentifier });
