@@ -486,6 +486,46 @@ export class WorldBuilderTools {
         },
       },
       {
+        name: 'manage-effects',
+        description:
+          "Create, list, update or delete ActiveEffect documents on an Item (a world item, or one embedded on an actor if actorIdentifier is given). Unlike Activities, ActiveEffect is a real embedded collection, so this is a thinner wrapper — but automation modules (Midi-QOL/DAE) key off specific flags (flags.dae.transfer, flags.dae.stackable, flags.dae.selfTarget...) that are easy to get subtly wrong by hand. When replicating a known mechanic (e.g. an aura/Region effect), prefer copying an existing working example's effectData verbatim over inventing flags from scratch.\n" +
+          '- "create": Add a new ActiveEffect. Pass effectData (name, changes: [{key, value, mode}], and any flags needed). GM-only.\n' +
+          '- "list": List an item\'s existing effects with a short summary (name, disabled, transfer, changes).\n' +
+          '- "update": Patch an existing effect by id. GM-only.\n' +
+          '- "delete": Remove an effect by id. GM-only.\n' +
+          'change modes: 1=MULTIPLY, 2=ADD, 3=DOWNGRADE, 4=UPGRADE, 5=OVERRIDE. Common AC bonus: {key: "system.attributes.ac.bonus", value: "+2", mode: 2}.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            action: {
+              type: 'string',
+              enum: ['create', 'list', 'update', 'delete'],
+              description: 'Operation to perform.',
+            },
+            actorIdentifier: {
+              type: 'string',
+              description:
+                'Actor name or ID that owns the item. Omit to target a world-level item instead.',
+            },
+            itemIdentifier: {
+              type: 'string',
+              description: 'Name or ID of the item (world item, or embedded on actorIdentifier).',
+            },
+            effectId: {
+              type: 'string',
+              description: 'Effect ID. Required for "update" and "delete".',
+            },
+            effectData: {
+              type: 'object',
+              description:
+                'For "create": the new effect\'s full data (name, changes, duration, flags...). For "update": the fields to patch.',
+              additionalProperties: true,
+            },
+          },
+          required: ['action', 'itemIdentifier'],
+        },
+      },
+      {
         name: 'plutonium-search',
         description:
           'Search the full 5etools content bundled with the Plutonium module by name (far more content than the SRD compendiums). Supports many categories: creatures, spells, items, feats, backgrounds, races, optional features (invocations, metamagic...), objects, vehicles, traps, hazards, rewards and roll tables. Returns matching names with source book codes, to be used with plutonium-import. Requires the Plutonium module to be active.',
@@ -1006,6 +1046,31 @@ export class WorldBuilderTools {
       actor: params.actorIdentifier ?? 'world',
     });
     return this.query('manageActivities', params);
+  }
+
+  async handleManageEffects(args: any): Promise<any> {
+    const schema = z
+      .object({
+        action: z.enum(['create', 'list', 'update', 'delete']),
+        actorIdentifier: z.string().min(1).optional(),
+        itemIdentifier: z.string().min(1, 'itemIdentifier is required'),
+        effectId: z.string().min(1).optional(),
+        effectData: z.record(z.any()).optional(),
+      })
+      .refine(data => data.action !== 'create' || data.effectData, {
+        message: '"create" requires "effectData"',
+      })
+      .refine(data => !['update', 'delete'].includes(data.action) || data.effectId, {
+        message: '"update" and "delete" require "effectId"',
+      });
+
+    const params = schema.parse(args);
+    this.logger.info('Managing item effects', {
+      action: params.action,
+      item: params.itemIdentifier,
+      actor: params.actorIdentifier ?? 'world',
+    });
+    return this.query('manageEffects', params);
   }
 
   async handlePlaceTokens(args: any): Promise<any> {

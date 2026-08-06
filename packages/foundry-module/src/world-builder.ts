@@ -167,6 +167,7 @@ export class WorldBuilderHandlers {
     CONFIG.queries[`${PREFIX}.manageSceneAssets`] = this.handleManageSceneAssets.bind(this);
     CONFIG.queries[`${PREFIX}.manageTables`] = this.handleManageTables.bind(this);
     CONFIG.queries[`${PREFIX}.manageActivities`] = this.handleManageActivities.bind(this);
+    CONFIG.queries[`${PREFIX}.manageEffects`] = this.handleManageEffects.bind(this);
     CONFIG.queries[`${PREFIX}.plutoniumSearchAdventure`] =
       this.handlePlutoniumSearchAdventure.bind(this);
     CONFIG.queries[`${PREFIX}.placeTokens`] = this.handlePlaceTokens.bind(this);
@@ -1501,6 +1502,92 @@ export class WorldBuilderHandlers {
     if (data.newTitle) update.name = data.newTitle;
     await page.update(update);
     return { success: true, journal: entry.name, page: page.name, created: false };
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* Item Active Effects                                                  */
+  /* ------------------------------------------------------------------ */
+
+  private summarizeEffect(effect: any): Record<string, any> {
+    return {
+      id: effect.id,
+      name: effect.name,
+      disabled: effect.disabled,
+      transfer: effect.transfer,
+      changes: (effect.changes ?? []).map((c: any) => `${c.key} ${c.value} (mode ${c.mode})`),
+    };
+  }
+
+  /**
+   * Create/list/update/delete ActiveEffect documents on an Item (world item,
+   * or one embedded on an actor). Unlike Activities, ActiveEffect is a real
+   * Foundry embedded collection, so the plain createEmbeddedDocuments /
+   * updateEmbeddedDocuments / deleteEmbeddedDocuments API applies directly —
+   * no special lifecycle method needed. Still routed through its own tool
+   * (rather than folded into update-actor-items) because effects live at
+   * the top level of the Item document, not inside `system`, and because
+   * automation modules (Midi-QOL/DAE) key off specific flags
+   * (flags.dae.transfer, flags.dae.stackable...) that are easy to get wrong
+   * by hand — callers should copy a known-good example's flags rather than
+   * invent them.
+   */
+  async handleManageEffects(data: {
+    action: 'create' | 'list' | 'update' | 'delete';
+    actorIdentifier?: string;
+    itemIdentifier: string;
+    effectId?: string;
+    effectData?: Record<string, any>;
+  }): Promise<any> {
+    this.assertGM();
+    const action = data?.action;
+    if (!data?.itemIdentifier) throw new Error('itemIdentifier is required');
+
+    const item = this.findItemForActivities(data.actorIdentifier, data.itemIdentifier);
+
+    if (action === 'list') {
+      const effects = Array.from(item.effects ?? []).map((e: any) => this.summarizeEffect(e));
+      return { itemId: item.id, itemName: item.name, effects };
+    }
+
+    if (action === 'create') {
+      if (!data.effectData) throw new Error('effectData is required for "create"');
+      const [created] = await item.createEmbeddedDocuments('ActiveEffect', [data.effectData]);
+      if (!created) throw new Error('ActiveEffect was not created');
+      return {
+        success: true,
+        itemId: item.id,
+        itemName: item.name,
+        effect: this.summarizeEffect(created),
+      };
+    }
+
+    if (action === 'update') {
+      if (!data.effectId) throw new Error('effectId is required for "update"');
+      if (!item.effects?.get(data.effectId)) {
+        throw new Error(`Effect "${data.effectId}" not found on "${item.name}"`);
+      }
+      await item.updateEmbeddedDocuments('ActiveEffect', [
+        { _id: data.effectId, ...(data.effectData ?? {}) },
+      ]);
+      const updated = item.effects?.get(data.effectId);
+      return {
+        success: true,
+        itemId: item.id,
+        itemName: item.name,
+        effect: this.summarizeEffect(updated),
+      };
+    }
+
+    if (action === 'delete') {
+      if (!data.effectId) throw new Error('effectId is required for "delete"');
+      if (!item.effects?.get(data.effectId)) {
+        return { success: true, itemId: item.id, itemName: item.name, deleted: false };
+      }
+      await item.deleteEmbeddedDocuments('ActiveEffect', [data.effectId]);
+      return { success: true, itemId: item.id, itemName: item.name, deleted: true };
+    }
+
+    throw new Error(`Unknown action "${action}". Use: create, list, update, delete.`);
   }
 
   /* ------------------------------------------------------------------ */
