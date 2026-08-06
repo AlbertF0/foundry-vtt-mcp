@@ -352,6 +352,95 @@ export class WorldBuilderTools {
         },
       },
       {
+        name: 'manage-tables',
+        description:
+          'Create and manage homebrew RollTable documents — for tables the GM writes by hand (loot, rumors, random encounters, NPC names...) rather than importing from 5etools. For official/published tables, prefer plutonium-search + plutonium-import (category "table"). Specify the operation with "action":\n' +
+          '- "create": Create a new RollTable with a flat list of weighted text results. Ranges and the roll formula (e.g. "1d20") are computed automatically from the weights, the same way Foundry\'s own "Normalize Results" does. GM-only.\n' +
+          '- "list": List world RollTables, optionally filtered by folder or name.\n' +
+          '- "get": Fetch a table by name/ID with all of its results (text, weight, numeric range).\n' +
+          '- "update": Rename/move/re-describe an existing table, and/or replace or append to its results. GM-only.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            action: {
+              type: 'string',
+              enum: ['create', 'list', 'get', 'update'],
+              description: 'Operation to perform.',
+            },
+            tableIdentifier: {
+              type: 'string',
+              description: 'Table name or ID. Required for "get" and "update".',
+            },
+            name: {
+              type: 'string',
+              description: 'Table name. Required for "create"; for "update", renames the table.',
+            },
+            description: {
+              type: 'string',
+              description: 'Flavor text shown on the table sheet.',
+            },
+            img: {
+              type: 'string',
+              description: 'Icon path for the table, relative to user data.',
+            },
+            folder: {
+              type: 'string',
+              description:
+                'RollTable folder name (created if missing). For "list", filters to that folder. For "update", pass an empty string to move the table out of its folder.',
+            },
+            nameFilter: {
+              type: 'string',
+              description: 'For "list": case-insensitive substring match on table name.',
+            },
+            replacement: {
+              type: 'boolean',
+              description:
+                'Whether drawn results stay eligible for future draws (default true = draw with replacement).',
+            },
+            displayRoll: {
+              type: 'boolean',
+              description:
+                'Whether to show the roll breakdown in chat when someone draws (default true).',
+            },
+            results: {
+              type: 'array',
+              minItems: 1,
+              description:
+                'For "create": the table\'s results (required). For "update": REPLACES every existing result and recomputes ranges — omit if you only want to add entries, use addResults instead.',
+              items: {
+                type: 'object',
+                properties: {
+                  text: { type: 'string', description: 'The outcome text for this entry' },
+                  weight: {
+                    type: 'number',
+                    description:
+                      'How many consecutive numbers on the die this entry occupies (default 1). Higher weight = more likely.',
+                  },
+                  img: { type: 'string', description: 'Optional icon path for this entry' },
+                },
+                required: ['text'],
+              },
+            },
+            addResults: {
+              type: 'array',
+              minItems: 1,
+              description:
+                'For "update" only: append these entries after the existing ones instead of replacing the table, extending the roll formula\'s range.',
+              items: {
+                type: 'object',
+                properties: {
+                  text: { type: 'string' },
+                  weight: { type: 'number' },
+                  img: { type: 'string' },
+                },
+                required: ['text'],
+              },
+            },
+          },
+          required: ['action'],
+        },
+      },
+      {
         name: 'plutonium-search',
         description:
           'Search the full 5etools content bundled with the Plutonium module by name (far more content than the SRD compendiums). Supports many categories: creatures, spells, items, feats, backgrounds, races, optional features (invocations, metamagic...), objects, vehicles, traps, hazards, rewards and roll tables. Returns matching names with source book codes, to be used with plutonium-import. Requires the Plutonium module to be active.',
@@ -804,6 +893,48 @@ export class WorldBuilderTools {
       scene: params.sceneIdentifier ?? 'all',
     });
     return this.query('manageSceneAssets', params);
+  }
+
+  async handleManageTables(args: any): Promise<any> {
+    const resultEntrySchema = z.object({
+      text: z.string().min(1, 'Result text cannot be empty'),
+      weight: z.number().positive().optional(),
+      img: z.string().optional(),
+    });
+
+    const schema = z
+      .object({
+        action: z.enum(['create', 'list', 'get', 'update']),
+        tableIdentifier: z.string().min(1).optional(),
+        name: z.string().min(1).optional(),
+        description: z.string().optional(),
+        img: z.string().optional(),
+        folder: z.string().optional(),
+        nameFilter: z.string().optional(),
+        replacement: z.boolean().optional(),
+        displayRoll: z.boolean().optional(),
+        results: z.array(resultEntrySchema).min(1).optional(),
+        addResults: z.array(resultEntrySchema).min(1).optional(),
+      })
+      .refine(data => data.action !== 'create' || (data.name && data.results?.length), {
+        message: '"create" requires "name" and at least one entry in "results"',
+      })
+      .refine(data => data.action !== 'get' || data.tableIdentifier, {
+        message: '"get" requires "tableIdentifier"',
+      })
+      .refine(data => data.action !== 'update' || data.tableIdentifier, {
+        message: '"update" requires "tableIdentifier"',
+      })
+      .refine(data => !(data.results && data.addResults), {
+        message: 'pass either "results" or "addResults", not both',
+      });
+
+    const params = schema.parse(args);
+    this.logger.info('Managing roll tables', {
+      action: params.action,
+      table: params.tableIdentifier ?? params.name ?? 'all',
+    });
+    return this.query('manageTables', params);
   }
 
   async handlePlaceTokens(args: any): Promise<any> {

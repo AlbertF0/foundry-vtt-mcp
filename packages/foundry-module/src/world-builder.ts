@@ -165,6 +165,7 @@ export class WorldBuilderHandlers {
     CONFIG.queries[`${PREFIX}.plutoniumImportMap`] = this.handlePlutoniumImportMap.bind(this);
     CONFIG.queries[`${PREFIX}.setSceneBackground`] = this.handleSetSceneBackground.bind(this);
     CONFIG.queries[`${PREFIX}.manageSceneAssets`] = this.handleManageSceneAssets.bind(this);
+    CONFIG.queries[`${PREFIX}.manageTables`] = this.handleManageTables.bind(this);
     CONFIG.queries[`${PREFIX}.plutoniumSearchAdventure`] =
       this.handlePlutoniumSearchAdventure.bind(this);
     CONFIG.queries[`${PREFIX}.placeTokens`] = this.handlePlaceTokens.bind(this);
@@ -1499,6 +1500,210 @@ export class WorldBuilderHandlers {
     if (data.newTitle) update.name = data.newTitle;
     await page.update(update);
     return { success: true, journal: entry.name, page: page.name, created: false };
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* Roll tables                                                          */
+  /* ------------------------------------------------------------------ */
+
+  private findRollTable(identifier: string): any {
+    return (
+      game.tables?.get(identifier) ||
+      game.tables?.getName(identifier) ||
+      game.tables?.find((t: any) => t.name?.toLowerCase() === identifier.toLowerCase()) ||
+      null
+    );
+  }
+
+  /**
+   * Turn a flat list of {text, weight} entries into TableResult creation data
+   * with consecutive numeric ranges, the way Foundry's own "Normalize Results"
+   * button does. `startAt` lets addResults() extend an existing table instead
+   * of restarting from 1.
+   */
+  private buildResultRanges(
+    entries: Array<{ text: string; weight?: number; img?: string }>,
+    startAt = 1
+  ): { docs: Array<Record<string, any>>; total: number } {
+    let cursor = startAt;
+    const docs = entries.map(entry => {
+      const weight = entry.weight && entry.weight > 0 ? Math.floor(entry.weight) : 1;
+      const range = [cursor, cursor + weight - 1];
+      cursor += weight;
+      return {
+        type: 'text',
+        text: entry.text,
+        range,
+        weight,
+        ...(entry.img ? { img: entry.img } : {}),
+      };
+    });
+    return { docs, total: cursor - 1 };
+  }
+
+  /**
+   * Create, list, fetch or update homebrew RollTable documents — the write
+   * path plutonium-import doesn't cover, for tables the DM writes by hand
+   * (loot, rumors, random encounters...) instead of pulling from 5etools.
+   */
+  async handleManageTables(data: {
+    action: 'create' | 'list' | 'get' | 'update';
+    tableIdentifier?: string;
+    name?: string;
+    description?: string;
+    img?: string;
+    folder?: string;
+    nameFilter?: string;
+    replacement?: boolean;
+    displayRoll?: boolean;
+    results?: Array<{ text: string; weight?: number; img?: string }>;
+    addResults?: Array<{ text: string; weight?: number; img?: string }>;
+  }): Promise<any> {
+    this.assertGM();
+    const action = data?.action;
+
+    if (action === 'create') {
+      if (!data.name) throw new Error('name is required for "create"');
+      if (!Array.isArray(data.results) || data.results.length === 0) {
+        throw new Error('results is required for "create" and must contain at least one entry');
+      }
+
+      const folderId = data.folder
+        ? (await this.getOrCreateFolder(data.folder, 'RollTable')).id
+        : null;
+
+      const { docs, total } = this.buildResultRanges(data.results);
+      const RollTableCls = (globalThis as any).RollTable;
+      const table = await RollTableCls.create({
+        name: data.name,
+        description: data.description ?? '',
+        img: data.img,
+        folder: folderId,
+        formula: `1d${total}`,
+        replacement: data.replacement !== false,
+        displayRoll: data.displayRoll !== false,
+      });
+      await table.createEmbeddedDocuments('TableResult', docs);
+
+      return {
+        success: true,
+        id: table.id,
+        name: table.name,
+        formula: table.formula,
+        resultsCreated: docs.length,
+      };
+    }
+
+    if (action === 'list') {
+      const nameLower = data.nameFilter?.toLowerCase();
+      const folderName = data.folder?.trim();
+      let folderId: string | null = null;
+      if (folderName) {
+        const folderDoc = game.folders?.find(
+          (f: any) => f.type === 'RollTable' && (f.name === folderName || f.id === folderName)
+        );
+        if (!folderDoc) return { tables: [], total: 0 };
+        folderId = folderDoc.id;
+      }
+
+      const tables = Array.from(game.tables ?? [])
+        .filter((t: any) => (folderId ? t.folder?.id === folderId : true))
+        .filter((t: any) => (nameLower ? t.name?.toLowerCase().includes(nameLower) : true))
+        .map((t: any) => ({
+          id: t.id,
+          name: t.name,
+          formula: t.formula,
+          resultCount: t.results?.size ?? t.results?.length ?? 0,
+          replacement: t.replacement,
+          folderId: t.folder?.id ?? null,
+          folderName: t.folder?.name ?? null,
+        }));
+
+      return { tables, total: tables.length };
+    }
+
+    if (action === 'get') {
+      if (!data.tableIdentifier) throw new Error('tableIdentifier is required for "get"');
+      const table = this.findRollTable(data.tableIdentifier);
+      if (!table) throw new Error(`Table not found: ${data.tableIdentifier}`);
+
+      const results = Array.from(table.results ?? [])
+        .map((r: any) => ({
+          id: r.id,
+          text: r.text,
+          range: r.range,
+          weight: r.weight,
+          img: r.img,
+        }))
+        .sort((a: any, b: any) => (a.range?.[0] ?? 0) - (b.range?.[0] ?? 0));
+
+      return {
+        id: table.id,
+        name: table.name,
+        description: table.description,
+        img: table.img,
+        formula: table.formula,
+        replacement: table.replacement,
+        displayRoll: table.displayRoll,
+        folderId: table.folder?.id ?? null,
+        folderName: table.folder?.name ?? null,
+        results,
+      };
+    }
+
+    if (action === 'update') {
+      if (!data.tableIdentifier) throw new Error('tableIdentifier is required for "update"');
+      const table = this.findRollTable(data.tableIdentifier);
+      if (!table) throw new Error(`Table not found: ${data.tableIdentifier}`);
+
+      if (data.results && data.addResults) {
+        throw new Error('pass either "results" (replace all) or "addResults" (append), not both');
+      }
+
+      const patch: Record<string, any> = {};
+      if (data.name !== undefined) patch.name = data.name;
+      if (data.description !== undefined) patch.description = data.description;
+      if (data.img !== undefined) patch.img = data.img;
+      if (data.replacement !== undefined) patch.replacement = data.replacement;
+      if (data.displayRoll !== undefined) patch.displayRoll = data.displayRoll;
+      if (data.folder !== undefined) {
+        patch.folder = data.folder
+          ? (await this.getOrCreateFolder(data.folder, 'RollTable')).id
+          : null;
+      }
+
+      let resultsChanged = 0;
+
+      if (data.results) {
+        const existingIds = Array.from(table.results ?? []).map((r: any) => r.id);
+        if (existingIds.length) await table.deleteEmbeddedDocuments('TableResult', existingIds);
+        const { docs, total } = this.buildResultRanges(data.results);
+        await table.createEmbeddedDocuments('TableResult', docs);
+        patch.formula = `1d${total}`;
+        resultsChanged = docs.length;
+      } else if (data.addResults) {
+        const currentMax = Array.from(table.results ?? []).reduce(
+          (max: number, r: any) => Math.max(max, r.range?.[1] ?? 0),
+          0
+        );
+        const { docs, total } = this.buildResultRanges(data.addResults, currentMax + 1);
+        await table.createEmbeddedDocuments('TableResult', docs);
+        patch.formula = `1d${total}`;
+        resultsChanged = docs.length;
+      }
+
+      if (Object.keys(patch).length > 0) await table.update(patch);
+
+      return {
+        success: true,
+        id: table.id,
+        name: table.name,
+        formula: table.formula,
+        resultsChanged,
+      };
+    }
+
+    throw new Error(`Unknown action "${action}". Use: create, list, get, update.`);
   }
 
   /* ------------------------------------------------------------------ */
