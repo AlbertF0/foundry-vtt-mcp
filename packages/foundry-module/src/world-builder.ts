@@ -166,6 +166,7 @@ export class WorldBuilderHandlers {
     CONFIG.queries[`${PREFIX}.setSceneBackground`] = this.handleSetSceneBackground.bind(this);
     CONFIG.queries[`${PREFIX}.manageSceneAssets`] = this.handleManageSceneAssets.bind(this);
     CONFIG.queries[`${PREFIX}.manageTables`] = this.handleManageTables.bind(this);
+    CONFIG.queries[`${PREFIX}.manageActivities`] = this.handleManageActivities.bind(this);
     CONFIG.queries[`${PREFIX}.plutoniumSearchAdventure`] =
       this.handlePlutoniumSearchAdventure.bind(this);
     CONFIG.queries[`${PREFIX}.placeTokens`] = this.handlePlaceTokens.bind(this);
@@ -1500,6 +1501,135 @@ export class WorldBuilderHandlers {
     if (data.newTitle) update.name = data.newTitle;
     await page.update(update);
     return { success: true, journal: entry.name, page: page.name, created: false };
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* Item activities (dnd5e v4)                                          */
+  /* ------------------------------------------------------------------ */
+
+  /**
+   * Find an Item, either embedded on an actor (actorIdentifier given) or a
+   * world-level Item (actorIdentifier omitted).
+   */
+  private findItemForActivities(actorIdentifier: string | undefined, itemIdentifier: string): any {
+    if (actorIdentifier) {
+      const actor =
+        game.actors?.get(actorIdentifier) ||
+        game.actors?.getName(actorIdentifier) ||
+        game.actors?.find((a: any) => a.name?.toLowerCase() === actorIdentifier.toLowerCase());
+      if (!actor) throw new Error(`Actor not found: ${actorIdentifier}`);
+      const item = actor.items?.get(itemIdentifier) || actor.items?.getName(itemIdentifier);
+      if (!item) throw new Error(`Item "${itemIdentifier}" not found on actor "${actor.name}"`);
+      return item;
+    }
+    const item =
+      game.items?.get(itemIdentifier) ||
+      game.items?.getName(itemIdentifier) ||
+      game.items?.find((i: any) => i.name?.toLowerCase() === itemIdentifier.toLowerCase());
+    if (!item) throw new Error(`World item not found: ${itemIdentifier}`);
+    return item;
+  }
+
+  private summarizeActivity(activity: any): Record<string, any> {
+    // dnd5e normalises "multi-select" fields (damage part types, save
+    // ability list...) to a Set, not an Array — Array.from() handles both.
+    const damageParts = Array.from(activity.damage?.parts ?? []).map((p: any) => {
+      const types = Array.from(p.types ?? []).join('/');
+      return `${p.number}d${p.denomination}${p.bonus ? `+${p.bonus}` : ''}${types ? `[${types}]` : ''}`;
+    });
+    return {
+      id: activity.id,
+      type: activity.type,
+      name: activity.name || null,
+      activation: activity.activation?.type ?? null,
+      damageParts,
+      saveAbility: activity.save?.ability ? Array.from(activity.save.ability).join('/') : null,
+      attackAbility: activity.attack?.ability ?? null,
+      healing: activity.healing
+        ? `${activity.healing.number}d${activity.healing.denomination}${activity.healing.bonus ? `+${activity.healing.bonus}` : ''}`
+        : null,
+    };
+  }
+
+  /**
+   * Create/list/update/delete dnd5e v4 Activities on an Item (world item or
+   * one embedded on an actor). Activities are NOT a plain embedded
+   * collection — dnd5e stores them in a MappingField on the item's
+   * DataModel with their own lifecycle. Patching system.activities directly
+   * via updateEmbeddedDocuments bypasses that lifecycle: on a world with
+   * Midi-QOL (or similar) active, its hooks assume an activity went through
+   * Item#createActivity and throw on one that didn't. This goes through the
+   * real API instead: item.createActivity() / activity.update() /
+   * activity.delete().
+   */
+  async handleManageActivities(data: {
+    action: 'create' | 'list' | 'update' | 'delete';
+    actorIdentifier?: string;
+    itemIdentifier: string;
+    activityId?: string;
+    activityType?: string;
+    activityData?: Record<string, any>;
+  }): Promise<any> {
+    this.assertGM();
+    const action = data?.action;
+    if (!data?.itemIdentifier) throw new Error('itemIdentifier is required');
+
+    const item = this.findItemForActivities(data.actorIdentifier, data.itemIdentifier);
+
+    if (action === 'list') {
+      const activities = Array.from(item.system?.activities ?? []).map((a: any) =>
+        this.summarizeActivity(a)
+      );
+      return { itemId: item.id, itemName: item.name, activities };
+    }
+
+    if (action === 'create') {
+      if (!data.activityType) throw new Error('activityType is required for "create"');
+      // Item#createActivity only returns the ActivitySheet when renderSheet is
+      // true (dnd5e.mjs: `if (renderSheet) return created.sheet?.render(...)`,
+      // implicit undefined otherwise) — so with renderSheet:false there is
+      // nothing to read the new id from. Diff the activity ids before/after
+      // instead.
+      const before = new Set(Array.from(item.system?.activities ?? []).map((a: any) => a.id));
+      await item.createActivity(data.activityType, data.activityData ?? {}, { renderSheet: false });
+      const created = Array.from(item.system?.activities ?? []).find((a: any) => !before.has(a.id));
+      if (!created)
+        throw new Error('Activity was not created (Foundry returned no new activity id)');
+      return {
+        success: true,
+        itemId: item.id,
+        itemName: item.name,
+        activity: this.summarizeActivity(created),
+      };
+    }
+
+    if (action === 'update') {
+      if (!data.activityId) throw new Error('activityId is required for "update"');
+      if (!item.system?.activities?.has(data.activityId)) {
+        throw new Error(`Activity "${data.activityId}" not found on "${item.name}"`);
+      }
+      // updateActivity/deleteActivity live on the Item, not the Activity
+      // instance (dnd5e.mjs), and both are just `this.update({...})` wrappers.
+      await item.updateActivity(data.activityId, data.activityData ?? {});
+      const updated = item.system?.activities?.get(data.activityId);
+      return {
+        success: true,
+        itemId: item.id,
+        itemName: item.name,
+        activity: this.summarizeActivity(updated),
+      };
+    }
+
+    if (action === 'delete') {
+      if (!data.activityId) throw new Error('activityId is required for "delete"');
+      if (!item.system?.activities?.has(data.activityId)) {
+        return { success: true, itemId: item.id, itemName: item.name, deleted: false };
+      }
+      await item.deleteActivity(data.activityId);
+      return { success: true, itemId: item.id, itemName: item.name, deleted: true };
+    }
+
+    throw new Error(`Unknown action "${action}". Use: create, list, update, delete.`);
   }
 
   /* ------------------------------------------------------------------ */

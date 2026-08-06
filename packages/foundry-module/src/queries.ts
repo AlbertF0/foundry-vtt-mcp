@@ -117,6 +117,7 @@ export class QueryHandlers {
     // Item authoring on actor sheets
     CONFIG.queries[`${modulePrefix}.addActorItems`] = this.handleAddActorItems.bind(this);
     CONFIG.queries[`${modulePrefix}.updateActorItems`] = this.handleUpdateActorItems.bind(this);
+    CONFIG.queries[`${modulePrefix}.deleteActorItems`] = this.handleDeleteActorItems.bind(this);
     CONFIG.queries[`${modulePrefix}.copyWorldItemToActor`] =
       this.handleCopyWorldItemToActor.bind(this);
 
@@ -1693,6 +1694,36 @@ export class QueryHandlers {
     } catch (error) {
       throw new Error(
         `Failed to propagate world items to actors: ${error instanceof Error ? error.message : 'Unknown error'}`
+      );
+    }
+  }
+
+  private async handleDeleteActorItems(data: {
+    actorIdentifier: string;
+    itemIds: string[];
+  }): Promise<any> {
+    try {
+      const gmCheck = this.validateGMAccess();
+      if (!gmCheck.allowed) {
+        return { error: 'Access denied', success: false };
+      }
+
+      this.dataAccess.validateFoundryState();
+
+      if (!data?.actorIdentifier) {
+        throw new Error('actorIdentifier is required');
+      }
+      if (!Array.isArray(data?.itemIds) || data.itemIds.length === 0) {
+        throw new Error('itemIds array is required and must contain at least one entry');
+      }
+
+      return await this.dataAccess.deleteActorItems({
+        actorIdentifier: data.actorIdentifier,
+        itemIds: data.itemIds,
+      });
+    } catch (error) {
+      throw new Error(
+        `Failed to delete actor items: ${error instanceof Error ? error.message : 'Unknown error'}`
       );
     }
   }

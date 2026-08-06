@@ -441,6 +441,51 @@ export class WorldBuilderTools {
         },
       },
       {
+        name: 'manage-activities',
+        description:
+          "Create, list, update or delete dnd5e v4 Activities on an Item (a world item, or one embedded on an actor if actorIdentifier is given) — the attack roll / saving throw / damage / healing mechanics a feat, spell or piece of equipment actually runs when used. IMPORTANT: activities are NOT plain JSON you can patch via manage-world-items/update-actor-items — they go through their own lifecycle (Item#createActivity), which some worlds' automation modules (e.g. Midi-QOL) require to have run correctly. Always use this tool for activity work, never hand-write system.activities.\n" +
+          '- "create": Add a new activity. Pass activityType ("attack", "save", "damage", "heal", "utility"...) and activityData (the fields for that type — see below). GM-only.\n' +
+          '- "list": List an item\'s existing activities with a short summary of each (type, damage/save/attack shape).\n' +
+          '- "update": Patch an existing activity by id. GM-only.\n' +
+          '- "delete": Remove an activity by id. GM-only.\n' +
+          'Common activityData fields: activation ({type: "action"|"bonus"|"reaction"|"special", condition}), range ({units: "self"|"touch"|"ft", value}), target ({affects: {type, count}}), and the type-specific block — attack: {ability, type: {value: "melee"|"ranged", classification: "weapon"|"spell"}}, damage: {parts: [{number, denomination, bonus, types: ["fire", ...]}]}, save: {ability, dc: {calculation: "spellcasting"}}, healing: {number, denomination, bonus, types: ["healing"|"temphp"]}.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            action: {
+              type: 'string',
+              enum: ['create', 'list', 'update', 'delete'],
+              description: 'Operation to perform.',
+            },
+            actorIdentifier: {
+              type: 'string',
+              description:
+                'Actor name or ID that owns the item. Omit to target a world-level item instead.',
+            },
+            itemIdentifier: {
+              type: 'string',
+              description: 'Name or ID of the item (world item, or embedded on actorIdentifier).',
+            },
+            activityId: {
+              type: 'string',
+              description: 'Activity ID. Required for "update" and "delete".',
+            },
+            activityType: {
+              type: 'string',
+              description:
+                'Activity type for "create", e.g. "attack", "save", "damage", "heal", "utility", "check", "summon".',
+            },
+            activityData: {
+              type: 'object',
+              description:
+                'For "create": the new activity\'s data. For "update": the fields to patch (merged into the existing activity).',
+              additionalProperties: true,
+            },
+          },
+          required: ['action', 'itemIdentifier'],
+        },
+      },
+      {
         name: 'plutonium-search',
         description:
           'Search the full 5etools content bundled with the Plutonium module by name (far more content than the SRD compendiums). Supports many categories: creatures, spells, items, feats, backgrounds, races, optional features (invocations, metamagic...), objects, vehicles, traps, hazards, rewards and roll tables. Returns matching names with source book codes, to be used with plutonium-import. Requires the Plutonium module to be active.',
@@ -935,6 +980,32 @@ export class WorldBuilderTools {
       table: params.tableIdentifier ?? params.name ?? 'all',
     });
     return this.query('manageTables', params);
+  }
+
+  async handleManageActivities(args: any): Promise<any> {
+    const schema = z
+      .object({
+        action: z.enum(['create', 'list', 'update', 'delete']),
+        actorIdentifier: z.string().min(1).optional(),
+        itemIdentifier: z.string().min(1, 'itemIdentifier is required'),
+        activityId: z.string().min(1).optional(),
+        activityType: z.string().min(1).optional(),
+        activityData: z.record(z.any()).optional(),
+      })
+      .refine(data => data.action !== 'create' || data.activityType, {
+        message: '"create" requires "activityType"',
+      })
+      .refine(data => !['update', 'delete'].includes(data.action) || data.activityId, {
+        message: '"update" and "delete" require "activityId"',
+      });
+
+    const params = schema.parse(args);
+    this.logger.info('Managing item activities', {
+      action: params.action,
+      item: params.itemIdentifier,
+      actor: params.actorIdentifier ?? 'world',
+    });
+    return this.query('manageActivities', params);
   }
 
   async handlePlaceTokens(args: any): Promise<any> {

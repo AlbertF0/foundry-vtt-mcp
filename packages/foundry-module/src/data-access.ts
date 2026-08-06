@@ -4575,6 +4575,40 @@ export class FoundryDataAccess {
   }
 
   /**
+   * Delete one or more of an actor's own embedded Item documents by id.
+   * Companion to addActorItems/updateActorItems — cleanup for a botched
+   * add, or removing a feature the character no longer has.
+   */
+  async deleteActorItems(params: {
+    actorIdentifier: string;
+    itemIds: string[];
+  }): Promise<{ actorId: string; actorName: string; deleted: string[] }> {
+    this.validateFoundryState();
+
+    const { actorIdentifier, itemIds } = params;
+    if (!actorIdentifier) throw new Error('actorIdentifier is required');
+    if (!Array.isArray(itemIds) || itemIds.length === 0) {
+      throw new Error('itemIds array is required and must contain at least one entry');
+    }
+
+    const actor = this.findActorByIdentifier(actorIdentifier);
+    if (!actor) throw new Error(`Actor not found: ${actorIdentifier}`);
+
+    const existing = itemIds.filter(id => actor.items?.get(id));
+    if (existing.length === 0) {
+      return { actorId: actor.id, actorName: actor.name, deleted: [] };
+    }
+
+    await actor.deleteEmbeddedDocuments('Item', existing);
+    this.auditLog(
+      'deleteActorItems',
+      { actorIdentifier, actorId: actor.id, count: existing.length },
+      'success'
+    );
+    return { actorId: actor.id, actorName: actor.name, deleted: existing };
+  }
+
+  /**
    * Copy an existing world-level Item into an actor's embedded item collection.
    * Looks up the world item by name or ID, then calls createEmbeddedDocuments so
    * the actor gets a full copy of the item data.

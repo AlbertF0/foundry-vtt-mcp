@@ -1790,6 +1790,11 @@ async function startBackend(): Promise<void> {
 
                   break;
 
+                case 'manage-activities':
+                  result = await worldBuilderTools.handleManageActivities(args);
+
+                  break;
+
                 case 'place-tokens':
                   result = await worldBuilderTools.handlePlaceTokens(args);
 

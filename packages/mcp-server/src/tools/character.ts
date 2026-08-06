@@ -149,6 +149,7 @@ export class CharacterTools {
           '- "update": Update existing world-level Items by ID. GM-only.\n' +
           '- "add-to-actor": Create and attach new Items directly to an existing actor. GM-only.\n' +
           '- "update-actor-items": Update an actor\'s OWN embedded Items in place (e.g. correcting or translating a PC\'s existing spells/feats/equipment) — no matching world Item needed, unlike propagate-to-actors. Pass actorIdentifier and updates. GM-only.\n' +
+          '- "delete-actor-items": Remove one or more of an actor\'s own embedded Items by id (e.g. cleaning up a botched add, or removing a feature). Pass actorIdentifier and itemIds. GM-only.\n' +
           '- "copy-world-item-to-actor": Copy an existing world-level Item (from game.items) into an actor\'s inventory. Pass actorIdentifier and itemIdentifier (name or ID). GM-only.\n' +
           '- "propagate-to-actors": Push edited world Items (e.g. after translating them) onto the copies actors already hold. Matching happens inside Foundry by compendium source, then system.identifier, then name; pass "originalName" per item so name matching still works after a rename. Scans world actors plus unlinked scene tokens (item piles). Use dryRun first to preview. GM-only.',
         inputSchema: {
@@ -163,11 +164,12 @@ export class CharacterTools {
                 'update',
                 'add-to-actor',
                 'update-actor-items',
+                'delete-actor-items',
                 'copy-world-item-to-actor',
                 'propagate-to-actors',
               ],
               description:
-                'Operation to perform: "get" a single item by ID (includes description), "create" world items, "list" world items, "update" world items by id, "add-to-actor" to create and attach items to an actor, "update-actor-items" to edit an actor\'s own embedded items in place, "copy-world-item-to-actor" to copy an existing world item into an actor, or "propagate-to-actors" to push edited world items onto the copies actors already hold.',
+                'Operation to perform: "get" a single item by ID (includes description), "create" world items, "list" world items, "update" world items by id, "add-to-actor" to create and attach items to an actor, "update-actor-items" to edit an actor\'s own embedded items in place, "delete-actor-items" to remove embedded items from an actor, "copy-world-item-to-actor" to copy an existing world item into an actor, or "propagate-to-actors" to push edited world items onto the copies actors already hold.',
             },
             items: {
               type: 'array',
@@ -255,6 +257,12 @@ export class CharacterTools {
               type: 'string',
               description:
                 'For "copy-world-item-to-actor": name or ID of the world-level item to copy into the actor.',
+            },
+            itemIds: {
+              type: 'array',
+              minItems: 1,
+              description: 'For "delete-actor-items": IDs of the embedded items to remove.',
+              items: { type: 'string' },
             },
             propagateItems: {
               type: 'array',
@@ -642,6 +650,35 @@ export class CharacterTools {
     }
   }
 
+  async handleDeleteActorItems(args: any): Promise<any> {
+    const schema = z.object({
+      actorIdentifier: z.string().min(1, 'Actor identifier cannot be empty'),
+      itemIds: z.array(z.string().min(1)).min(1, 'At least one item id is required'),
+    });
+
+    const { actorIdentifier, itemIds } = schema.parse(args);
+
+    this.logger.info('Deleting actor items', { actorIdentifier, count: itemIds.length });
+
+    try {
+      const result = await this.foundryClient.query('foundry-mcp-bridge.deleteActorItems', {
+        actorIdentifier,
+        itemIds,
+      });
+
+      this.logger.debug('Successfully deleted actor items', {
+        deleted: result.deleted?.length ?? 0,
+      });
+
+      return result;
+    } catch (error) {
+      this.logger.error('Failed to delete actor items', error);
+      throw new Error(
+        `Failed to delete items on "${actorIdentifier}": ${error instanceof Error ? error.message : 'Unknown error'}`
+      );
+    }
+  }
+
   async handleUpdateWorldItems(args: any): Promise<any> {
     const updateEntrySchema = z.object({
       id: z.string().min(1, 'Item id cannot be empty'),
@@ -765,6 +802,7 @@ export class CharacterTools {
           'update',
           'add-to-actor',
           'update-actor-items',
+          'delete-actor-items',
           'copy-world-item-to-actor',
           'propagate-to-actors',
         ]),
@@ -784,6 +822,8 @@ export class CharacterTools {
         return this.handleAddActorItems(args);
       case 'update-actor-items':
         return this.handleUpdateActorItems(args);
+      case 'delete-actor-items':
+        return this.handleDeleteActorItems(args);
       case 'copy-world-item-to-actor':
         return this.handleCopyWorldItemToActor(args);
       case 'propagate-to-actors':
