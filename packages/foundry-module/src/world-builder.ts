@@ -1641,6 +1641,12 @@ export class WorldBuilderHandlers {
       healing: activity.healing
         ? `${activity.healing.number}d${activity.healing.denomination}${activity.healing.bonus ? `+${activity.healing.bonus}` : ''}`
         : null,
+      // Raw, unfiltered — Midi-QOL-specific fields (triggeredActivityId,
+      // automationOnly, regionBehavior...) live here and aren't worth
+      // hand-picking one at a time; expose them verbatim so a caller can
+      // verify what actually got written instead of guessing.
+      midiProperties: activity.midiProperties ?? null,
+      regionBehavior: activity.regionBehavior ?? null,
     };
   }
 
