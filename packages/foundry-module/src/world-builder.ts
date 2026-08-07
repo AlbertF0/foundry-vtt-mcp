@@ -1509,12 +1509,18 @@ export class WorldBuilderHandlers {
   /* ------------------------------------------------------------------ */
 
   private summarizeEffect(effect: any): Record<string, any> {
+    // Read from system.changes (the raw stored data) rather than the
+    // derived `effect.changes` getter dnd5e v4 exposes for back-compat —
+    // the getter can normalise/drop fields during data preparation, which
+    // would make a real value look wrong here when it isn't.
+    const rawChanges = effect.system?.changes ?? effect.changes ?? [];
     return {
       id: effect.id,
       name: effect.name,
       disabled: effect.disabled,
       transfer: effect.transfer,
-      changes: (effect.changes ?? []).map((c: any) => `${c.key} ${c.value} (mode ${c.mode})`),
+      changes: rawChanges.map((c: any) => `${c.key} ${c.value} (mode ${c.mode})`),
+      changesRaw: rawChanges,
     };
   }
 
