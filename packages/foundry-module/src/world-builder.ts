@@ -1647,6 +1647,7 @@ export class WorldBuilderHandlers {
       // verify what actually got written instead of guessing.
       midiProperties: activity.midiProperties ?? null,
       regionBehavior: activity.regionBehavior ?? null,
+      duration: activity.duration ?? null,
     };
   }
 
