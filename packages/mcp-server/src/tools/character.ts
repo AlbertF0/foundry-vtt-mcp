@@ -450,6 +450,7 @@ export class CharacterTools {
           equipped: entity.system?.equipped,
           attunement: entity.system?.attunement,
           hasImage: !!entity.img,
+          img: entity.img,
           // Include full system data for advanced use cases
           system: entity.system,
         };

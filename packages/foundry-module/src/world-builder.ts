@@ -1626,9 +1626,13 @@ export class WorldBuilderHandlers {
   private summarizeActivity(activity: any): Record<string, any> {
     // dnd5e normalises "multi-select" fields (damage part types, save
     // ability list...) to a Set, not an Array — Array.from() handles both.
+    // p.formula / healing.formula are DataModel getters that already respect
+    // custom.enabled (falls back to the auto number/denomination/bonus build
+    // otherwise) — use them instead of hand-building the string, or a
+    // custom-formula edit looks unapplied here while it's actually live.
     const damageParts = Array.from(activity.damage?.parts ?? []).map((p: any) => {
       const types = Array.from(p.types ?? []).join('/');
-      return `${p.number}d${p.denomination}${p.bonus ? `+${p.bonus}` : ''}${types ? `[${types}]` : ''}`;
+      return `${p.formula ?? ''}${types ? `[${types}]` : ''}`;
     });
     return {
       id: activity.id,
@@ -1638,9 +1642,7 @@ export class WorldBuilderHandlers {
       damageParts,
       saveAbility: activity.save?.ability ? Array.from(activity.save.ability).join('/') : null,
       attackAbility: activity.attack?.ability ?? null,
-      healing: activity.healing
-        ? `${activity.healing.number}d${activity.healing.denomination}${activity.healing.bonus ? `+${activity.healing.bonus}` : ''}`
-        : null,
+      healing: activity.healing?.formula ?? null,
       // Raw, unfiltered — Midi-QOL-specific fields (triggeredActivityId,
       // automationOnly, regionBehavior...) live here and aren't worth
       // hand-picking one at a time; expose them verbatim so a caller can
