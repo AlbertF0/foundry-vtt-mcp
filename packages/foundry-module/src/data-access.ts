@@ -4594,7 +4594,12 @@ export class FoundryDataAccess {
     const actor = this.findActorByIdentifier(actorIdentifier);
     if (!actor) throw new Error(`Actor not found: ${actorIdentifier}`);
 
-    const existing = itemIds.filter(id => actor.items?.get(id));
+    // {invalid: true} also matches embedded items that failed schema
+    // validation on load (e.g. a hand-typed activity _id that isn't 16
+    // alphanumeric chars) — those are otherwise invisible to actor.items.get()
+    // and would silently fail to delete, leaving Foundry re-throwing the same
+    // validation error on every actor data reset.
+    const existing = itemIds.filter(id => actor.items?.get(id, { invalid: true }));
     if (existing.length === 0) {
       return { actorId: actor.id, actorName: actor.name, deleted: [] };
     }
